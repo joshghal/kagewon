@@ -19,7 +19,8 @@
   },
   "scripts": {
     "start": "node proxy.mjs",
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "test:swift": "bash menubar/test.sh"
   },
   "dependencies": {
     "proxy-chain": "^3.0.1"

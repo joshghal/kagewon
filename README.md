@@ -15,6 +15,7 @@ HTTP and HTTPS are both supported. HTTPS traffic is tunneled and is not decrypte
 - [Installation](#installation)
 - [Usage](#usage)
 - [Security model](#security-model)
+- [Safety guidance](#safety-guidance)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [License](#license)
@@ -29,7 +30,7 @@ the idea: a ring with a shadow inside it. The same two ideas exist as characters
 
 - macOS 14 or later
 - Xcode Command Line Tools, to build the app (`xcode-select --install`)
-- Node.js 20.11 or later; a current long-term-support release is recommended
+- Node.js 22 LTS or later is recommended. Node.js 20.11 also works, but the Node.js project no longer supports it.
 - Tor, only if you want to use the Tor provider (see [docs/tor.md](docs/tor.md))
 
 ## Installation
@@ -81,8 +82,9 @@ When several providers are enabled, the **Traffic share** value of each one cont
 
 By default, if the helper process stops, the app switches the Mac's proxy settings off so that your internet keeps working
 and your traffic goes out directly. The kill switch reverses this: the settings stay on, so applications that follow the
-Mac's proxy settings cannot connect until the proxy is running again. Enable it in Settings if you prefer losing the
-connection to exposing your real IP address.
+Mac's proxy settings cannot connect until the proxy is running again. The app also holds the proxy port with a listener
+that drops every connection, so no other program on the Mac can take it over. Enable the kill switch in Settings if you
+prefer losing the connection to exposing your real IP address. Press Try Again or quit the app to restore the connection.
 
 ## Security model
 
@@ -90,6 +92,12 @@ connection to exposing your real IP address.
 
 - It covers every active network (Wi-Fi, Ethernet, a hotspot), including one that appears while it is on. The app warns you
   if another program changes those settings.
+- While it is on, the automatic proxy settings of those networks (a PAC file and automatic proxy discovery) are switched off,
+  because they can send traffic around a manual proxy. They are put back exactly as they were when you turn the proxy off.
+  What was changed is written to `.system-proxy.json` first, so the next start of the app can undo it after a crash.
+- When you turn the proxy on, the app checks that it works: it looks up your real IP address directly, then looks it up the
+  way an application would. If the two match, a warning says that your real address is still reaching the internet, for
+  example because a VPN client routes around the proxy.
 - It covers only applications that follow the Mac's proxy settings. Command-line tools (use `curl -x http://127.0.0.1:8888`),
   some applications, system services, UDP traffic, and WebRTC can bypass it.
 - Addresses on this Mac and on the local network are never sent to a provider: `localhost`, `10.x.x.x`, `172.16.x.x` to
@@ -104,9 +112,13 @@ connection to exposing your real IP address.
 - Your Webshare API key is stored in `config.json` with mode 600. It is not encrypted, so any program running as your user
   can read it, and backup tools will copy it. Revoke the key in your Webshare dashboard if you believe it has leaked.
 - The log file at `~/Library/Logs/Kagewon.log` is readable only by you and never contains the sites you visit. The Activity
-  tab does show recent sites, but only in memory.
+  tab does show recent sites, but only in memory, and they are cleared when you turn the proxy off.
+- The helper process receives only `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `USER`, and its own settings, not the rest of the
+  environment that the app inherited.
 - The app contacts `api.ipify.org` (with `icanhazip.com` as a fallback) to show your exit IP address, `proxy.webshare.io`
-  to load your proxy list, and `check.torproject.org` briefly when Tor starts.
+  to load your proxy list, and `check.torproject.org` briefly when Tor starts. Once when you turn the proxy on, it also asks
+  `api.ipify.org` directly, without the proxy, to learn your real IP address for the leak check. That service sees your real
+  address, as every website you visit does. The request carries no app name.
 
 ### Known limitations
 
@@ -114,10 +126,10 @@ connection to exposing your real IP address.
   host names you connect to. Tor does not have this limitation.
 - Anyone who can run programs on your Mac can use the proxy on `127.0.0.1:8888` and spend your bandwidth. It is not
   reachable from the network, and a web page cannot use it.
-- While the kill switch is active, or after an unclean shutdown, the Mac may point at a local port that nothing is listening
-  on. Another local program could bind that port. This matters on shared Macs.
+- If the Mac loses power, or both the app and its helper are killed, nothing listens on the proxy port any more. Another
+  local program could bind that port until you open the app again. This matters on shared Macs.
 - If the Mac loses power or restarts while the proxy is on, the proxy settings may stay on until you open the app, which
-  clears them at startup. To clear them by hand:
+  clears them at startup and restores the automatic settings it saved. To clear them by hand:
 
   ```bash
   networksetup -listallnetworkservices | tail -n +2 | while read s; do
@@ -126,7 +138,54 @@ connection to exposing your real IP address.
   done
   ```
 
-- Turning the proxy on replaces any proxy you had configured on the same network. Turning it off does not restore it.
+- Turning the proxy on replaces any manual proxy you had configured on the same network, and turning it off does not restore
+  it. A PAC file and automatic proxy discovery are restored.
+
+## Safety guidance
+
+Kagewon changes the IP address that websites see. It does not make you anonymous, and it does not hide your activity from
+the proxy provider. This section explains what each party can see, what is not protected, and how to reduce the risk.
+
+### What each party can see
+
+| Traffic | Webshare proxy | Tor exit relay |
+|---|---|---|
+| HTTPS site (address starts with `https://`) | The host name and port, plus the size and timing of the encrypted traffic. Not the content. | The same |
+| Plain HTTP site (address starts with `http://`) | Everything: the address, cookies, form data, and the response | The same |
+| Your real IP address | Yes, because the connection comes from your Mac | No. Only the first Tor relay sees it, and it does not see where you go. |
+
+Kagewon never decrypts HTTPS and sends no usage data to anyone. The services it contacts are listed under
+[Data handling](#data-handling).
+
+### What Kagewon cannot protect
+
+- **Host names.** A provider can log which sites you connect to. Kagewon cannot prevent that.
+- **Plain HTTP content.** Nothing protects it from the provider or from a Tor exit relay.
+- **Applications that ignore the Mac's proxy settings.** Command-line tools (unless you use `curl -x http://127.0.0.1:8888`),
+  some applications, system services, UDP traffic, and WebRTC go out with your real IP address.
+- **Who you are on a site.** A site can still recognize you by your login, cookies, and browser fingerprint. A new IP address
+  does not change them.
+- **The proxy login on an untrusted network.** Webshare proxies are reached over plain HTTP, so someone on the same network
+  can see the proxy login and the host names you connect to.
+
+### Recommended practice
+
+1. **Log in only to HTTPS sites.** On a plain HTTP site, the provider or the exit relay can read your password.
+2. **Use Tor for sensitive browsing.** No single party sees both who you are and where you go. Tor is slower, and some sites
+   block it.
+3. **Prefer Tor on public or shared networks.** Webshare proxies use plain HTTP to reach the proxy.
+4. **Use Sticky rotation for logins.** Random rotation changes the IP address on every connection, which breaks sessions and
+   can make a site flag your account.
+5. **Check the result after turning the proxy on.** The Exit IP tile should show an address that is not your own. If a warning
+   says that your real IP is still reaching the internet, stop and find the cause, for example a VPN client that routes around
+   the proxy.
+6. **Turn on the kill switch if exposing your real IP is worse than losing the connection.** It only affects applications that
+   follow the Mac's proxy settings.
+7. **Turn the proxy off when you are done.** The recent-sites list in the Activity tab is cleared at that point.
+8. **Protect your API key.** `config.json` is private to your user account but is not encrypted. Do not commit it, share it,
+   or post screenshots of it, and exclude it from cloud sync if you can. If you suspect it has leaked, revoke it in your
+   Webshare dashboard and paste a new one in the app.
+9. **Use proxies only for activities you are permitted to perform.** See the [Disclaimer](#disclaimer).
 
 ## Troubleshooting
 
@@ -143,7 +202,8 @@ connection to exposing your real IP address.
 
 ```bash
 npm install
-npm test             # unit and integration tests
+npm test             # helper tests
+npm run test:swift   # system proxy tests, run against a stand-in for networksetup (no real setting is changed)
 node proxy.mjs       # run the helper on its own; the app normally starts it
 ```
 
@@ -151,7 +211,7 @@ node proxy.mjs       # run the helper on its own; the app normally starts it
 |---|---|
 | `proxy.mjs` | Helper entry point |
 | `src/` | Helper modules: proxy engine, providers, Tor management, configuration, control interface |
-| `menubar/` | The macOS app (Swift) and its build script |
+| `menubar/` | The macOS app (Swift), its build script, and its tests |
 | `docs/` | Additional documentation and the logo |
 | `test/` | Automated tests |
 

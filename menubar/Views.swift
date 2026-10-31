@@ -43,9 +43,9 @@ func typeName(_ type: String) -> String { type == "tor" ? "Tor" : "Webshare" }
 func isGatewayType(_ type: String) -> Bool { type == "tor" }
 
 func torDetail(_ p: ProviderInfo, running: Bool) -> String {
-    var t = running ? "Tor running on 127.0.0.1:\(p.socksPort ?? 9250)" : "Free · starts with the proxy"
+    var t = running ? "Tor running on 127.0.0.1:\(p.socksPort ?? 9250)" : "Free, starts with the proxy"
     let c = p.exitCountries ?? []
-    if !c.isEmpty { t += " · exit in \(c.joined(separator: ", "))" }
+    if !c.isEmpty { t += ", exit in \(c.joined(separator: ", "))" }
     return t
 }
 
@@ -59,7 +59,7 @@ func providerLine(_ p: ProviderInfo) -> (text: String, color: Color) {
     }
     if p.type == "tor" { return (torDetail(p, running: false), .secondary) }
     let c = p.countries ?? []
-    return (c.isEmpty ? "Webshare account · all countries" : "Webshare account · \(c.joined(separator: ", "))", .secondary)
+    return (c.isEmpty ? "Webshare account, all countries" : "Webshare account, \(c.joined(separator: ", "))", .secondary)
 }
 
 // MARK: - Root
@@ -94,16 +94,16 @@ struct HeaderView: View {
 
     private var subtitle: String {
         switch model.phase {
-        case .launching: return "Starting helper…"
-        case .off: return "Off · traffic goes direct"
-        case .starting: return "Connecting…"
+        case .launching: return "Starting helper..."
+        case .off: return "Off, traffic goes direct"
+        case .starting: return "Connecting..."
         case .on:
             let active = (model.status?.providers ?? []).filter { $0.enabled && $0.runtime.status == "ok" }
             if !active.isEmpty && active.allSatisfy({ isGatewayType($0.type) }) {
-                return "On · rotating via \(active.map(\.name).joined(separator: ", "))"
+                return "On, rotating via \(active.map(\.name).joined(separator: ", "))"
             }
             let n = active.reduce(0) { $0 + $1.runtime.healthy }
-            return "On · \(n) \(n == 1 ? "proxy" : "proxies") ready"
+            return "On, \(n) \(n == 1 ? "proxy" : "proxies") ready"
         case .error(let m): return m
         }
     }
@@ -198,6 +198,17 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
+                if let warning = model.leakWarning {
+                    Card {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Your real IP may be exposed", systemImage: "exclamationmark.shield.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.orange)
+                            Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 if case .error(let msg) = model.phase {
                     Card {
                         VStack(alignment: .leading, spacing: 8) {
@@ -212,8 +223,8 @@ struct HomeView: View {
 
                 HStack(spacing: 10) {
                     Tile(title: "Exit IP",
-                         value: model.isOn ? (model.exitIP ?? "checking…") : "Off",
-                         caption: model.isOn ? (model.ipCheckedAt.map { "Seen by ipify · \(Self.clock.string(from: $0))" } ?? "Seen by ipify") : "Turn on to see it",
+                         value: model.isOn ? (model.exitIP ?? "checking...") : "Off",
+                         caption: model.isOn ? (model.ipCheckedAt.map { "Seen by ipify at \(Self.clock.string(from: $0))" } ?? "Seen by ipify") : "Turn on to see it",
                          action: model.isOn ? { Task { await model.refreshIP() } } : nil,
                          busy: model.ipBusy)
                     Tile(title: allGateways ? "Source" : "Proxies",
@@ -378,10 +389,10 @@ struct ProviderRow: View {
                         .controlSize(.small)
                         .labelsHidden()
                     Menu {
-                        Button("Edit…") { model.beginEdit(p) }
+                        Button("Edit...") { model.beginEdit(p) }
                         Button("Test connection") { model.testSaved(p.id) }
                         Divider()
-                        Button("Delete…") { model.pendingDelete = p.id }
+                        Button("Delete...") { model.pendingDelete = p.id }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -411,7 +422,7 @@ struct TestBadge: View {
         case .running:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
-                Text("Testing…").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Testing...").font(.system(size: 11)).foregroundStyle(.secondary)
             }
         case .done(let ok, let text):
             Label(text, systemImage: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
@@ -546,7 +557,7 @@ struct ActivityView: View {
                         HStack(spacing: 6) {
                             Text(s.site).font(.system(size: 11, weight: .medium)).lineLimit(1)
                             Spacer()
-                            Text("\(s.provider) · \(s.proxy)").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                            Text("\(s.provider), \(s.proxy)").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                             Text(duration(s.expiresIn)).font(.system(size: 10)).foregroundStyle(.tertiary).frame(width: 40, alignment: .trailing)
                         }
                     }
@@ -610,7 +621,7 @@ struct FooterBar: View {
             tabButton(.activity, "list.bullet.rectangle", "Activity")
             Spacer()
             Menu {
-                Button("Settings…") { model.showSettings() }
+                Button("Settings...") { model.showSettings() }
                 Button("Open Log File") { model.openLogFile() }
                 Divider()
                 Button("Quit Kagewon") { NSApp.terminate(nil) }
@@ -686,7 +697,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Toggle("Kill switch: block the internet if the proxy stops", isOn: $model.settings.killSwitch)
                                 .font(.system(size: 12))
-                            Text("If the helper stops, the Mac stays pointed at the proxy and apps that follow its proxy settings cannot connect. Use it if you prefer losing the connection to exposing your real IP. Press Try Again or quit the app to restore it.")
+                            Text("If the helper stops, the Mac stays pointed at the proxy and Kagewon keeps that port closed, so apps that follow the Mac's proxy settings cannot connect. Use it if you prefer losing the connection to exposing your real IP. Press Try Again or quit the app to restore it.")
                                 .font(.system(size: 10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -705,7 +716,7 @@ struct SettingsView: View {
                         SectionTitle("Where your keys are stored")
                         Text("Your Webshare key is pasted in the Providers tab and saved in config.json, which only your user account can read. It is not encrypted, so any program running as you can read it. There is no .env file.")
                             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        Text("The proxy covers every active network, but only apps that follow the Mac's proxy settings. The log file never contains the sites you visit.")
+                        Text("The proxy covers every active network, but only apps that follow the Mac's proxy settings. While it is on, automatic proxy settings (PAC file, proxy discovery) are switched off and are restored when you turn it off. The log file never contains the sites you visit.")
                             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         HStack(spacing: 8) {
                             Button("Show config file") { model.openConfigFolder() }

@@ -31,3 +31,5 @@ coverage/
 xcuserdata/
 *.xcuserstate
 .claude/
+.system-proxy.json
+.system-proxy.json.tmp

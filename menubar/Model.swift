@@ -144,6 +144,10 @@ final class AppModel: ObservableObject {
     private var activeServices: [String] = []
     private var isQuitting = false
     private var lastKillSwitch = false
+    /// Holds the proxy port after the proxy stopped, while the kill switch keeps the Mac offline.
+    private let holder = PortHolder()
+    /// The previous turn-off, which turning on again must wait for (otherwise its stop request could end the new session).
+    private var stopTask: Task<Void, Never>?
     private var tick = 0
     let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
     let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Kagewon.log")
@@ -158,6 +162,8 @@ final class AppModel: ObservableObject {
     var popoverOpen = false
     @Published var tab: Tab = .home
     @Published var logLines: [LogLine] = []
+    /// Set when traffic from this Mac still arrives with its real IP address although the proxy is on.
+    @Published var leakWarning: String?
 
     @Published var draft = ProviderDraft(type: "webshare")
     @Published var isEditing = false
@@ -196,7 +202,7 @@ final class AppModel: ObservableObject {
             ?? ProcessInfo.processInfo.environment["KAGEWON_DIR"]
             ?? NSHomeDirectory() + "/kagewon"
         controlPort = Int(ProcessInfo.processInfo.environment["CONTROL_PORT"] ?? "") ?? 8889
-        systemProxy = SystemProxy(port: readConfigPort(proxyDir))
+        systemProxy = SystemProxy(port: readConfigPort(proxyDir), recordPath: proxyDir + "/.system-proxy.json")
 
         let cfg = URLSessionConfiguration.ephemeral
         cfg.connectionProxyDictionary = [:] // the control API is local: never route it through a proxy
@@ -216,7 +222,7 @@ final class AppModel: ObservableObject {
         if command.hasSuffix(" " + proxyDir + "/proxy.mjs") {
             kill(pid, SIGTERM)
             // It holds the control port until it has stopped Tor (a few seconds at most), so wait for it to be gone.
-            for _ in 0..<40 where kill(pid, 0) == 0 { usleep(100_000) }
+            for _ in 0..<50 where kill(pid, 0) == 0 { usleep(100_000) }
             if kill(pid, 0) == 0 { kill(pid, SIGKILL); usleep(300_000) }
         }
     }
@@ -224,7 +230,7 @@ final class AppModel: ObservableObject {
     func start() {
         // Clean up after a previous crash or force-quit.
         stopStaleHelper()
-        if systemProxy.pointsAtUs { systemProxy.disable() }
+        systemProxy.disable() // undoes a crashed run, using the record it wrote, and restores the automatic settings
         launchDaemon()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -242,12 +248,13 @@ final class AppModel: ObservableObject {
         if isDuplicate { return } // the first copy owns the proxy settings and the helper
         isQuitting = true
         pollTimer?.invalidate()
+        SystemProxy.closeForQuit() // waits for a change that is already running, and refuses any later one
         disableSystemProxy() // first, so the Mac keeps its internet
         if let p = daemon {
             daemon = nil
             p.terminationHandler = nil
             p.terminate()
-            for _ in 0..<20 where p.isRunning { usleep(100_000) }
+            for _ in 0..<50 where p.isRunning { usleep(100_000) } // up to 5 s, so it can stop Tor cleanly
             if p.isRunning { kill(p.processIdentifier, SIGKILL) }
         }
     }
@@ -281,6 +288,7 @@ final class AppModel: ObservableObject {
             FileManager.default.createFile(atPath: logURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
         }
         recentLines = []
+        clearLog() // a new helper numbers its log lines from the start again
         daemonReady = false
         phase = .launching
 
@@ -288,7 +296,10 @@ final class AppModel: ObservableObject {
         p.executableURL = URL(fileURLWithPath: node)
         p.arguments = [proxyDir + "/proxy.mjs"]
         p.currentDirectoryURL = URL(fileURLWithPath: proxyDir)
-        var env = ProcessInfo.processInfo.environment
+        // The helper gets only what it needs, not everything this app inherited (tokens in the login environment, proxy variables...).
+        let inherited = ProcessInfo.processInfo.environment
+        var env: [String: String] = [:]
+        for key in ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER"] { if let v = inherited[key] { env[key] = v } }
         env["AUTOSTART"] = "false"
         env["CONTROL_TOKEN"] = token
         env["CONTROL_PORT"] = String(controlPort)
@@ -356,8 +367,7 @@ final class AppModel: ObservableObject {
         daemon = nil
         daemonReady = false
         launchTimeout?.cancel()
-        let keepBlocking = lastKillSwitch && activeProxy != nil
-        if !keepBlocking { disableSystemProxy() }
+        let keepBlocking = proxyLost()
         exitIP = nil
         status = nil
         let reason = p.terminationReason == .uncaughtSignal
@@ -405,14 +415,24 @@ final class AppModel: ObservableObject {
         guard let s: APIStatus = try? await api("GET", "/api/status") else { return }
         status = s
         lastKillSwitch = s.killSwitch ?? false
-        if phase != .on { systemProxy = SystemProxy(port: s.listenPort ?? s.port) }
+        if phase != .on { systemProxy = SystemProxy(port: s.listenPort ?? s.port, recordPath: systemProxy.recordPath) }
         if phase == .on, s.state != "running" {
-            let keepBlocking = lastKillSwitch
-            if !keepBlocking { disableSystemProxy() }
+            let keepBlocking = proxyLost()
             exitIP = nil
             let why = s.lastError ?? "The proxy stopped unexpectedly"
             phase = .error(keepBlocking ? "\(why). The kill switch is on, so the internet stays blocked until you press Try Again." : why)
         }
+    }
+
+    /// The proxy stopped while the Mac was pointed at it. With the kill switch on, the settings stay and this app holds the port,
+    /// so the Mac is offline and nothing else can listen there. Otherwise the settings are switched off. Returns true if blocking.
+    private func proxyLost() -> Bool {
+        if lastKillSwitch, let active = activeProxy {
+            holder.hold(port: active.port)
+            return true
+        }
+        disableSystemProxy()
+        return false
     }
 
     /// Every 15 seconds while on: is the Mac still pointed at the proxy? Something else (a VPN client, System Settings)
@@ -427,7 +447,6 @@ final class AppModel: ObservableObject {
         }.value
         guard phase == .on else { return }
         if !check.lost.isEmpty {
-            activeProxy = nil
             exitIP = nil
             phase = .error("The proxy settings for \(check.lost.joined(separator: ", ")) were changed by something else, so that traffic may be going direct. Press Try Again to switch them back on.")
             return
@@ -436,6 +455,11 @@ final class AppModel: ObservableObject {
             let result = await Task.detached { active.apply(to: check.added) }.value
             if result.error == nil { activeServices += result.applied }
         }
+    }
+
+    private func clearLog() {
+        logLines = []
+        logSince = 0
     }
 
     func refreshLog() async {
@@ -473,7 +497,13 @@ final class AppModel: ObservableObject {
     func turnOn() {
         guard daemonReady else { startAfterLaunch = true; launchDaemon(); return }
         phase = .starting
+        leakWarning = nil
+        let previousStop = stopTask
         Task {
+            await previousStop?.value // a turn-off that is still finishing must be done first
+            holder.release() // the helper needs the port that the kill switch was holding
+            // The real IP is looked up now, while the proxy is still off, and while the helper loads its providers.
+            let direct = Task.detached { await AppModel.lookupIP(viaSystemSettings: false) }
             do {
                 let _: Empty = try await api("POST", "/api/proxy/start", timeout: 150)
                 await refreshStatus() // the port the helper is really using
@@ -494,8 +524,11 @@ final class AppModel: ObservableObject {
                 phase = .on
                 await refreshStatus()
                 await refreshIP()
+                await checkForLeak(realIP: await direct.value)
             } catch {
                 phase = .error(error.localizedDescription)
+                // Still pointed at a stopped proxy from before (kill switch): keep holding the port, or switch it off.
+                if activeProxy != nil { if lastKillSwitch { holder.hold(port: activeProxy?.port ?? systemProxy.port) } else { disableSystemProxy() } }
                 await refreshStatus()
             }
         }
@@ -503,6 +536,7 @@ final class AppModel: ObservableObject {
 
     /// Switches the macOS proxy off, but only where it still points at us.
     func disableSystemProxy() {
+        holder.release()
         let active = activeProxy ?? systemProxy
         active.disable()
         if active.port != systemProxy.port { systemProxy.disable() }
@@ -512,10 +546,13 @@ final class AppModel: ObservableObject {
     func turnOff() {
         let active = activeProxy ?? systemProxy
         let current = systemProxy
+        holder.release()
         activeProxy = nil
         exitIP = nil
+        leakWarning = nil
+        clearLog() // the lines name the sites that were visited, so they end with the session
         phase = .off
-        Task {
+        stopTask = Task {
             await Task.detached {
                 active.disable()
                 if active.port != current.port { current.disable() }
@@ -523,6 +560,40 @@ final class AppModel: ObservableObject {
             let _: Empty? = try? await api("POST", "/api/proxy/stop")
             await refreshStatus()
         }
+    }
+
+    // MARK: Leak check
+
+    /// The address a public echo service sees. Going direct (empty proxy list) gives the real IP; following the Mac's
+    /// settings gives the one that apps get. No app name is sent: it is a plain request, like any browser would make.
+    nonisolated static func lookupIP(viaSystemSettings: Bool) async -> String? {
+        let cfg = URLSessionConfiguration.ephemeral
+        if !viaSystemSettings { cfg.connectionProxyDictionary = [:] }
+        cfg.timeoutIntervalForRequest = 8
+        cfg.httpAdditionalHeaders = ["User-Agent": "Mozilla/5.0"]
+        let session = URLSession(configuration: cfg)
+        defer { session.finishTasksAndInvalidate() }
+        for address in ["https://api.ipify.org", "https://icanhazip.com"] {
+            guard let url = URL(string: address),
+                  let (data, resp) = try? await session.data(from: url),
+                  (resp as? HTTPURLResponse)?.statusCode == 200 else { continue }
+            let text = String(decoding: data.prefix(64), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if (3...45).contains(text.count), text.allSatisfy({ $0.isHexDigit || $0 == "." || $0 == ":" }) { return text }
+        }
+        return nil
+    }
+
+    /// Compares what apps get through the Mac's own proxy settings with the real IP found before turning on.
+    /// An unknown answer (offline, blocked check site) shows nothing: only a match proves a leak.
+    private func checkForLeak(realIP: String?) async {
+        guard let real = realIP else { return }
+        for attempt in 0..<2 {
+            guard phase == .on, let seen = await AppModel.lookupIP(viaSystemSettings: true) else { return }
+            if seen != real { return }
+            if attempt == 0 { try? await Task.sleep(nanoseconds: 1_500_000_000) } // macOS may need a moment to publish the new settings
+        }
+        guard phase == .on else { return }
+        leakWarning = "Traffic from this Mac is still reaching the internet with your real IP address (\(real)). A VPN or another network setting may be routing around Kagewon."
     }
 
     // MARK: Settings
