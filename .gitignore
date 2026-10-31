@@ -1,0 +1,33 @@
+# --- Secrets and local data: never publish these ---
+config.json
+config.json.*
+.env
+.env.*
+*.pem
+*.key
+.tor/
+.helper.pid
+
+# --- Logs and temporary files ---
+*.log
+*.tmp
+*.swp
+*.bak
+npm-debug.log*
+
+# --- Dependencies and build output (rebuilt with `npm install` and menubar/build.sh) ---
+node_modules/
+*.app/
+build/
+.build/
+DerivedData/
+.swiftpm/
+coverage/
+
+# --- Editor, OS and tool files ---
+.DS_Store
+.vscode/
+.idea/
+xcuserdata/
+*.xcuserstate
+.claude/
