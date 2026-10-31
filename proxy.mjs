@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './src/config.mjs';
 import { Manager } from './src/manager.mjs';
@@ -75,7 +76,15 @@ if (!AUTOSTART) {
     } finally {
       await manager.stop().catch(() => {});
       control.close();
-      process.exit(0);
+      if (config.killSwitch) {
+        // The Mac keeps pointing at this port, so another program must not be able to take it over. Hold it, and refuse
+        // every connection, until the app starts again (it stops this helper and clears the settings).
+        const holder = net.createServer(socket => socket.destroy());
+        holder.once('error', () => process.exit(0));
+        holder.listen(port, '127.0.0.1');
+      } else {
+        process.exit(0);
+      }
     }
   };
   if (PARENT_PID === 1) appGone(); // the app was already gone before we got this far

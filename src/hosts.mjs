@@ -11,7 +11,19 @@ const MULTI_PART_SUFFIXES = new Set([
   'azurewebsites.net', 'cloudfront.net',
 ]);
 
-const clean = hostname => String(hostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+const MAX_HOST_LENGTH = 253;
+
+// Second-level labels used under country-code domains: a.com.vn, b.co.ke, c.org.uk. The registrable domain then has three labels.
+const SECOND_LEVEL = new Set(['com', 'co', 'org', 'net', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'gob', 'nom', 'mil', 'sch']);
+
+/** Removes every trailing dot with a loop (a regular expression on a very long string of dots would be slow). */
+function trimDots(h) {
+  let end = h.length;
+  while (end > 0 && h.charCodeAt(end - 1) === 46) end--;
+  return h.slice(0, end);
+}
+
+const clean = hostname => trimDots(String(hostname).toLowerCase().replace(/^\[|\]$/g, ''));
 
 /** The part of a hostname that identifies a "site": cdn.example.com and example.com share one, example.co.uk stays whole. */
 export function siteKey(hostname) {
@@ -19,7 +31,10 @@ export function siteKey(hostname) {
   if (net.isIP(h)) return h;
   const labels = h.split('.');
   if (labels.length <= 2) return h;
-  return MULTI_PART_SUFFIXES.has(labels.slice(-2).join('.')) ? labels.slice(-3).join('.') : labels.slice(-2).join('.');
+  const last = labels[labels.length - 1];
+  const second = labels[labels.length - 2];
+  const threeLabels = MULTI_PART_SUFFIXES.has(`${second}.${last}`) || (last.length === 2 && SECOND_LEVEL.has(second));
+  return threeLabels ? labels.slice(-3).join('.') : `${second}.${last}`;
 }
 
 const BLOCKED = new net.BlockList();
@@ -40,14 +55,24 @@ for (const [addr, bits] of [
  * all recognised. Returns null when the name cannot be read at all.
  */
 function normalize(hostname) {
-  const h = String(hostname).trim().toLowerCase().replace(/\.+$/, '');
+  const raw = String(hostname).trim().toLowerCase();
+  if (!raw || raw.length > MAX_HOST_LENGTH + 2) return null; // an absurdly long name is refused rather than examined
+  const h = trimDots(raw);
   if (!h) return null;
   const bare = h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
   try {
-    return new URL(`http://${bare.includes(':') ? `[${bare}]` : bare}`).hostname.replace(/^\[|\]$/g, '');
+    const parsed = new URL(`http://${bare.includes(':') ? `[${bare}]` : bare}`).hostname.replace(/^\[|\]$/g, '');
+    // A percent-encoded or full-width dot ("%2e", U+3002) only becomes a real trailing dot after parsing.
+    return trimDots(parsed) || null;
   } catch {
     return null;
   }
+}
+
+/** True if a CONNECT target is a plain "host:port" or "[ipv6]:port". Anything else is ambiguous between us and the provider. */
+export function isValidConnectTarget(target) {
+  return typeof target === 'string' && target.length <= MAX_HOST_LENGTH + 8
+    && /^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):\d{1,5}$/.test(target);
 }
 
 /**
@@ -62,5 +87,6 @@ export function isInternalHost(hostname) {
   if (kind === 4) return BLOCKED.check(h, 'ipv4');
   if (kind === 6) return BLOCKED.check(h, 'ipv6');
   if (!h.includes('.')) return true; // single-label names such as "localhost", "printer" or "nas"
-  return /\.(localhost|local|lan|internal|home\.arpa|localdomain)$/.test(h);
+  // names that only ever exist on a local network (home routers use .box and .home, offices use .corp and .intranet)
+  return /\.(localhost|local|lan|internal|home\.arpa|localdomain|home|corp|box|intranet|private|test|invalid)$/.test(h);
 }

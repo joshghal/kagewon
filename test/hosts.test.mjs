@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { siteKey, isInternalHost } from '../src/hosts.mjs';
+import { siteKey, isInternalHost, isValidConnectTarget } from '../src/hosts.mjs';
 
 test('siteKey groups subdomains but keeps registrable domains with a country suffix apart', () => {
   assert.equal(siteKey('cdn.example.com'), 'example.com');
@@ -41,5 +41,44 @@ test('a name that cannot be read is treated as internal, so odd spellings fail c
 test('public addresses written in odd ways are still public', () => {
   for (const h of ['0x08.0x08.0x08.0x08', '134744072', '[2606:4700::1111]', 'EXAMPLE.com.', 'xn--bcher-kva.example']) {
     assert.equal(isInternalHost(h), false, h);
+  }
+});
+
+test('spellings that only become a trailing dot after parsing are still caught', () => {
+  for (const h of ['localhost%2e', 'foo.local%2e', '127.0.0.1%2e', 'localhost%E3%80%82', 'localhost%2E%2E']) {
+    assert.equal(isInternalHost(h), true, h);
+  }
+});
+
+test('names used only on private networks are recognised', () => {
+  for (const h of ['fritz.box', 'printer.home', 'wiki.corp', 'app.intranet', 'files.private', 'x.test', 'y.invalid', 'router.lan']) {
+    assert.equal(isInternalHost(h), true, h);
+  }
+});
+
+test('a very long host name is refused quickly (it used to stall the helper)', () => {
+  for (const h of ['.'.repeat(15_000), 'a'.repeat(15_000) + '.com', 'a.'.repeat(8_000)]) {
+    const start = process.hrtime.bigint();
+    assert.equal(isInternalHost(h), true);
+    assert.ok(Number(process.hrtime.bigint() - start) / 1e6 < 50, 'must take well under 50 ms');
+  }
+});
+
+test('country-code registries with a second level keep three labels, so unrelated sites do not share an IP', () => {
+  assert.equal(siteKey('shop.example.com.vn'), 'example.com.vn');
+  assert.equal(siteKey('other.com.vn'), 'other.com.vn');
+  assert.equal(siteKey('www.example.co.ke'), 'example.co.ke');
+  assert.equal(siteKey('a.example.com.ng'), 'example.com.ng');
+  assert.equal(siteKey('www.example.co.in'), 'example.co.in');
+  assert.equal(siteKey('cdn.example.com'), 'example.com');
+  assert.equal(siteKey('www.example.de'), 'example.de');
+});
+
+test('only a plain host:port is accepted as a CONNECT target', () => {
+  for (const t of ['example.com:443', '1.2.3.4:80', '127.1:80', '[2606:4700::1111]:443', 'xn--bcher-kva.example:443']) {
+    assert.equal(isValidConnectTarget(t), true, t);
+  }
+  for (const t of ['127.0.0.1:80@evil.com:443', 'localhost%2e:80', 'a b:80', 'example.com', ':80', 'user:pw@host:80', 'host:80/path', 'a\\b:80', '']) {
+    assert.equal(isValidConnectTarget(t), false, t);
   }
 });

@@ -8,6 +8,8 @@ import path from 'node:path';
 const FALLBACK_PATHS = ['/opt/homebrew/bin/tor', '/usr/local/bin/tor', '/usr/bin/tor'];
 const BOOTSTRAP_TIMEOUT_MS = 100_000;
 const instances = new Map(); // providerId -> { proc, key, ready, onExit }
+const allProcs = new Set(); // every Tor process we started, so none can outlive us
+const locks = new Map(); // providerId -> the start or restart that is currently in progress
 
 const settingsKey = p => `${p.socksPort}|${(p.exitCountries ?? []).join(',')}`;
 
@@ -32,6 +34,8 @@ function writeTorrc(p, dataDir) {
     `DataDirectory ${quote(dataDir)}`,
     'ClientOnly 1',
     'Log notice stdout',
+    'SafeLogging 1',
+    'AvoidDiskWrites 1',
   ];
   if (p.exitCountries?.length) {
     lines.push(`ExitNodes ${p.exitCountries.map(c => `{${c.toLowerCase()}}`).join(',')}`, 'StrictNodes 1');
@@ -49,6 +53,8 @@ function spawnTor(p, dir, log, onExit) {
   // Tor gets only what it needs: nothing from our environment, such as the control token.
   const env = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' };
   const proc = spawn(bin, ['-f', writeTorrc(p, dataDir), '--ignore-missing-torrc'], { stdio: ['ignore', 'pipe', 'pipe'], env });
+  allProcs.add(proc);
+  proc.once('exit', () => allProcs.delete(proc));
   const pidFile = path.join(dataDir, 'tor.pid');
   try { fs.writeFileSync(pidFile, String(proc.pid), { mode: 0o600 }); } catch {}
 
@@ -111,8 +117,19 @@ async function warmUp(port) {
   for (let i = 0; i < 3; i++) await once();
 }
 
-/** Makes sure Tor is running with the provider's settings. Resolves when it has finished bootstrapping. */
-export async function ensureTor(p, dir, log, onExit) {
+/**
+ * Makes sure Tor is running with the provider's settings. Resolves when it has finished bootstrapping.
+ * Calls for the same provider run one after another: two overlapping calls used to start two Tor processes
+ * and track only one of them.
+ */
+export function ensureTor(p, dir, log, onExit) {
+  const run = (locks.get(p.id) ?? Promise.resolve()).catch(() => {}).then(() => ensureTorNow(p, dir, log, onExit));
+  locks.set(p.id, run);
+  run.then(() => {}, () => {}).then(() => { if (locks.get(p.id) === run) locks.delete(p.id); });
+  return run;
+}
+
+async function ensureTorNow(p, dir, log, onExit) {
   let entry = instances.get(p.id);
   let fresh = false;
   if (entry && entry.key !== settingsKey(p)) { await stopTor(p.id); entry = null; }
@@ -120,7 +137,7 @@ export async function ensureTor(p, dir, log, onExit) {
     fresh = true;
     entry = spawnTor(p, dir, log, onExit);
     instances.set(p.id, entry);
-    log('info', `Starting Tor on 127.0.0.1:${p.socksPort}…`);
+    log('info', `Starting Tor on 127.0.0.1:${p.socksPort}...`);
   }
   try {
     await entry.ready;
@@ -151,7 +168,7 @@ export const pruneTor = keepIds => Promise.all([...instances.keys()].filter(id =
 
 /** Synchronous last-resort cleanup when the process exits. */
 export function killAllTorNow() {
-  for (const { proc } of instances.values()) proc.kill('SIGKILL');
+  for (const proc of allProcs) proc.kill('SIGKILL');
 }
 
 /**

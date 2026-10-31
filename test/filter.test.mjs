@@ -44,6 +44,12 @@ test('local and private destinations are refused before reaching any provider; p
       '127.1:80', '0x7f.1:80', '0177.0.0.1:80', '[::ffff:7f00:1]:80', '[::1]:80', 'localhost..:80']) {
       assert.equal(await connect(port, target), 403, target);
     }
+    // spellings and shapes that could be read two ways, or that name a private network
+    for (const target of ['localhost%2e:80', '127.0.0.1:80@evil.com:443', 'user:pw@127.0.0.1:80', 'fritz.box:80', 'printer.home:80', 'wiki.corp:80',
+      'a'.repeat(300) + '.com:443']) {
+      const code = await connect(port, target);
+      assert.ok(code === 400 || code === 403, `${target.slice(0, 40)} was answered with ${code}`);
+    }
     assert.deepEqual(asked, [], 'the provider never saw a local address');
     await connect(port, 'example.com:443');
     assert.deepEqual(asked, ['example.com'], 'a public site is forwarded');

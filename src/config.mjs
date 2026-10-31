@@ -20,6 +20,9 @@ const MASK = '••••';
 const DEFAULT_NAMES = { webshare: 'Webshare', tor: 'Tor' };
 const ID_RE = /^[a-z0-9-]{1,40}$/;
 const KEEP_BROKEN_BACKUPS = 3;
+export const MAX_PROVIDERS = 20;
+const MAX_COUNTRIES = 250;
+const MAX_KEY_LENGTH = 200;
 
 const str = v => (typeof v === 'string' ? v.trim() : '');
 const clampInt = (v, min, max, fallback) => {
@@ -29,7 +32,9 @@ const clampInt = (v, min, max, fallback) => {
 const countries = v =>
   (Array.isArray(v) ? v : str(v).split(','))
     .map(s => String(s).trim().toUpperCase())
-    .filter(s => /^[A-Z]{2}$/.test(s));
+    .filter(s => /^[A-Z]{2}$/.test(s))
+    .filter((c, i, all) => all.indexOf(c) === i)
+    .slice(0, MAX_COUNTRIES);
 
 export const configPath = dir => path.join(dir, 'config.json');
 
@@ -82,7 +87,7 @@ export function normalizeSettings(input) {
 function sanitizeStored(providers) {
   const seen = new Set();
   const out = [];
-  for (const raw of providers) {
+  for (const raw of providers.slice(0, MAX_PROVIDERS)) {
     try {
       const p = normalizeProvider(raw && typeof raw === 'object' ? raw : {});
       if (typeof raw.id === 'string' && ID_RE.test(raw.id) && raw.id !== 'test' && !seen.has(raw.id)) p.id = raw.id; // 'test' is reserved for unsaved tests
@@ -105,6 +110,7 @@ export function loadConfig(dir) {
   const file = configPath(dir);
   if (fs.existsSync(file)) {
     try {
+      try { fs.chmodSync(file, 0o600); } catch {} // an older or hand-made file may be readable by others
       const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (cfg && Array.isArray(cfg.providers)) {
         const safe = {};
@@ -117,8 +123,7 @@ export function loadConfig(dir) {
         if (providers.length !== cfg.providers.length) {
           // Something was dropped, and the next save would erase it for good: keep a private copy of the file.
           const backup = `${file}.broken-${Date.now()}`;
-          fs.copyFileSync(file, backup);
-          fs.chmodSync(backup, 0o600);
+          fs.writeFileSync(backup, fs.readFileSync(file), { mode: 0o600, flag: 'wx' }); // private from the first byte
           pruneBackups(dir);
           console.warn(`Some providers in config.json were invalid and were ignored; the original is kept as ${path.basename(backup)}`);
         }
@@ -127,6 +132,7 @@ export function loadConfig(dir) {
     } catch {}
     const backup = `${file}.broken-${Date.now()}`;
     fs.renameSync(file, backup); // never overwrite a file we could not read
+    try { fs.chmodSync(backup, 0o600); } catch {}
     pruneBackups(dir);
     console.warn(`config.json was unreadable; moved it to ${path.basename(backup)}`);
   }
@@ -159,6 +165,7 @@ export function normalizeProvider(input, existing = null) {
   if (type === 'webshare') {
     out.apiKey = str(merged.apiKey);
     if (!out.apiKey) throw new Error('The API key is required');
+    if (out.apiKey.length > MAX_KEY_LENGTH) throw new Error('The API key is too long');
     out.countries = countries(merged.countries);
   } else {
     out.socksPort = clampInt(merged.socksPort, 0, 65535, 9250);

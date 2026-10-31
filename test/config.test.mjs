@@ -103,3 +103,18 @@ test('the id "test" is reserved for unsaved tests and never given to a stored pr
   const [p] = loadConfig(dir).providers;
   assert.notEqual(p.id, 'test');
 });
+
+test('input sizes are limited', () => {
+  assert.throws(() => normalizeProvider({ type: 'webshare', apiKey: 'k'.repeat(201) }), /too long/);
+  const many = Array.from({ length: 5000 }, (_, i) => String.fromCharCode(65 + (i % 26)) + String.fromCharCode(65 + ((i / 26) | 0) % 26)).join(',');
+  const p = normalizeProvider({ type: 'webshare', apiKey: 'k'.repeat(24), countries: many });
+  assert.ok(p.countries.length <= 250 && new Set(p.countries).size === p.countries.length);
+});
+
+test('a config file that is readable by others is made private when it is loaded', () => {
+  const dir = tempDir();
+  fs.writeFileSync(configPath(dir), JSON.stringify({ providers: [] }), { mode: 0o644 });
+  fs.chmodSync(configPath(dir), 0o644);
+  loadConfig(dir);
+  assert.equal(fs.statSync(configPath(dir)).mode & 0o777, 0o600);
+});

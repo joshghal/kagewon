@@ -88,3 +88,14 @@ test('old failure records are cleaned up', () => {
   assert.equal(m.siteBad.size, 0);
   assert.equal(m.siteFails.size, 0);
 });
+
+test('a failure on an unusual port does not touch the pinned IP of the real site', () => {
+  const m = manager();
+  const key = m.pick('bank.com').entry.key;
+  const pin = m.sticky.get('bank.com');
+  for (const port of [9, 22, 8080, 4443]) m.onFailure({ site: 'bank.com', key, port }, 403);
+  assert.equal(m.sticky.get('bank.com'), pin, 'the pin survives requests to other ports');
+  assert.equal(m.siteBad.size, 0);
+  m.onFailure({ site: 'bank.com', key, port: 443 }, 403);
+  assert.equal(m.sticky.has('bank.com'), false, 'a real failure on port 443 is still handled');
+});

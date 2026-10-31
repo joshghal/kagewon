@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { loadProvider, __torEntryForTest } from '../src/providers.mjs';
+import { loadProvider, __torEntryForTest, __validProxyForTest } from '../src/providers.mjs';
 import { normalizeProvider } from '../src/config.mjs';
 
 const KEY = 'abcdefghij0123456789WXYZ';
@@ -78,4 +78,60 @@ test('Tor logins carry the hostname to Tor (socks5h), and every random connectio
   assert.equal(entry.urlFor('abc123'), 'socks5h://s-abc123:x@127.0.0.1:9461');
   assert.notEqual(entry.urlFor(null), entry.urlFor(null));
   assert.equal(entry.kind, 'gateway');
+});
+
+test('a proxy address must be a real public host: loopback, LAN and malformed values are refused', () => {
+  const ok = host => __validProxyForTest({ proxy_address: host, port: 8080, username: 'u', password: 'p' });
+  for (const h of ['127.0.0.1', 'localhost', '10.0.0.5', '192.168.1.1', '100.64.0.1', 'fritz.box', '999.1.1.1', '1.2.3.4.5', '', 'bad host', '[::1]']) {
+    assert.equal(ok(h), false, h);
+  }
+  for (const h of ['1.2.3.4', 'proxy.example.com', '45.67.89.10']) assert.equal(ok(h), true, h);
+});
+
+test('one proxy with an unusable login does not abort the whole list', async () => {
+  const api = await fakeApi(() => ({ body: { next: null, results: [proxy({ username: '\ud800' }), proxy({ proxy_address: '5.6.7.8' })] } }));
+  try {
+    const entries = await loadProvider(webshare(), { WEBSHARE_API_BASE: api.base }, ctx);
+    assert.deepEqual(entries.map(e => e.label), ['5.6.7.8:8080']);
+  } finally { await api.close(); }
+});
+
+test('an oversized answer is rejected instead of being read into memory', async () => {
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(' '.repeat(6_000_000)); });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    await assert.rejects(loadProvider(webshare(), { WEBSHARE_API_BASE: `http://127.0.0.1:${server.address().port}` }, ctx), /too large/);
+  } finally { await new Promise(r => server.close(r)); }
+});
+
+test('a redirect to another host is refused, and one to the same host is followed', async () => {
+  const hits = [];
+  const other = await fakeApi(req => { hits.push(req.headers.authorization); return { body: {} }; });
+  let first = true;
+  const api = http.createServer((req, res) => {
+    if (req.url.startsWith('/api/v2/proxy/list/') && first) {
+      first = false;
+      res.writeHead(302, { location: other.base.replace('127.0.0.1', 'localhost') + '/stolen' });
+      return res.end();
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ next: null, results: [proxy()] }));
+  });
+  await new Promise(r => api.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${api.address().port}`;
+  try {
+    await assert.rejects(loadProvider(webshare(), { WEBSHARE_API_BASE: base }, ctx), /redirected somewhere unexpected/);
+    assert.deepEqual(hits, [], 'the key never reached the other host');
+  } finally { await new Promise(r => api.close(r)); await other.close(); }
+
+  const sameHostApi = http.createServer((req, res) => {
+    if (req.url === '/api/v2/proxy/list/?mode=direct&page=1&page_size=100') { res.writeHead(301, { location: '/moved' }); return res.end(); }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ next: null, results: [proxy()] }));
+  });
+  await new Promise(r => sameHostApi.listen(0, '127.0.0.1', r));
+  try {
+    const entries = await loadProvider(webshare(), { WEBSHARE_API_BASE: `http://127.0.0.1:${sameHostApi.address().port}` }, ctx);
+    assert.equal(entries.length, 1);
+  } finally { await new Promise(r => sameHostApi.close(r)); }
 });
