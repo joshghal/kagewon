@@ -8,7 +8,7 @@ export const SECRET_FIELDS = ['apiKey'];
 
 export const DEFAULT_SETTINGS = {
   rotation: 'sticky',
-  stickyMinutes: 10,
+  stickySeconds: 600, // how long a site keeps its IP: 30 seconds to 24 hours
   port: 8888,
   refreshMinutes: 15,
   verbose: false,
@@ -25,6 +25,10 @@ const MAX_COUNTRIES = 250;
 const MAX_KEY_LENGTH = 200;
 
 const str = v => (typeof v === 'string' ? v.trim() : '');
+/** Visible text only: a name with line breaks or control characters could forge lines in the log. */
+const plainText = v => str(v).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+/** A copy of a config file that is kept after a problem must not keep the keys in it. */
+const redactKeys = text => text.replace(/("apiKey"\s*:\s*")(?:[^"\\]|\\.)*(")/g, '$1[removed]$2');
 const clampInt = (v, min, max, fallback) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
@@ -74,7 +78,13 @@ export function normalizeSettings(input) {
     if (!Number.isInteger(n) || n < lo || n > hi) throw new Error(message);
     out[key] = n;
   };
-  intIn('stickyMinutes', 1, 1440, 'Sticky time must be 1 to 1440 minutes');
+  // Older apps and config files give the sticky time in whole minutes; that still works.
+  if (input.stickyMinutes !== undefined && input.stickySeconds === undefined) {
+    const minutes = Number(input.stickyMinutes);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new Error('Sticky time must be 30 seconds to 24 hours');
+    out.stickySeconds = minutes * 60;
+  }
+  intIn('stickySeconds', 30, 86400, 'Sticky time must be 30 seconds to 24 hours');
   intIn('port', 1024, 65535, 'The proxy port must be between 1024 and 65535');
   intIn('refreshMinutes', 1, 1440, 'Refresh time must be 1 to 1440 minutes');
   for (const key of ['verbose', 'rotateOpenConnections', 'killSwitch']) {
@@ -108,12 +118,19 @@ function pruneBackups(dir) {
 /** Loads config.json, or creates a default one. There is no .env file: everything is set in the app. */
 export function loadConfig(dir) {
   const file = configPath(dir);
+  // Temporary files left by a write that was interrupted are never needed again, and may hold a key.
+  try {
+    for (const name of fs.readdirSync(dir)) if (/^config\.json\.\d+\.tmp$/.test(name)) fs.rmSync(path.join(dir, name), { force: true });
+  } catch {}
   if (fs.existsSync(file)) {
     try {
       try { fs.chmodSync(file, 0o600); } catch {} // an older or hand-made file may be readable by others
       const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (cfg && Array.isArray(cfg.providers)) {
         const safe = {};
+        if (cfg.stickySeconds === undefined && cfg.stickyMinutes !== undefined) {
+          try { Object.assign(safe, normalizeSettings({ stickyMinutes: cfg.stickyMinutes })); } catch {} // a file from before 30 second steps
+        }
         for (const [k, v] of Object.entries(cfg)) {
           if (k in DEFAULT_SETTINGS) {
             try { Object.assign(safe, normalizeSettings({ [k]: v })); } catch {}
@@ -123,7 +140,7 @@ export function loadConfig(dir) {
         if (providers.length !== cfg.providers.length) {
           // Something was dropped, and the next save would erase it for good: keep a private copy of the file.
           const backup = `${file}.broken-${Date.now()}`;
-          fs.writeFileSync(backup, fs.readFileSync(file), { mode: 0o600, flag: 'wx' }); // private from the first byte
+          fs.writeFileSync(backup, redactKeys(fs.readFileSync(file, 'utf8')), { mode: 0o600, flag: 'wx' }); // private from the first byte, and without the keys
           pruneBackups(dir);
           console.warn(`Some providers in config.json were invalid and were ignored; the original is kept as ${path.basename(backup)}`);
         }
@@ -132,7 +149,10 @@ export function loadConfig(dir) {
     } catch {}
     const backup = `${file}.broken-${Date.now()}`;
     fs.renameSync(file, backup); // never overwrite a file we could not read
-    try { fs.chmodSync(backup, 0o600); } catch {}
+    try {
+      fs.chmodSync(backup, 0o600);
+      fs.writeFileSync(backup, redactKeys(fs.readFileSync(backup, 'utf8'))); // the copy is for diagnosis; it does not need the keys
+    } catch {}
     pruneBackups(dir);
     console.warn(`config.json was unreadable; moved it to ${path.basename(backup)}`);
   }
@@ -157,7 +177,7 @@ export function normalizeProvider(input, existing = null) {
   const out = {
     id: existing?.id ?? `${type}-${crypto.randomBytes(3).toString('hex')}`, // never taken from user input
     type,
-    name: str(merged.name).slice(0, 60) || DEFAULT_NAMES[type],
+    name: plainText(merged.name).slice(0, 60) || DEFAULT_NAMES[type],
     enabled: merged.enabled !== false,
     weight: clampInt(merged.weight, 1, 10, 1),
   };
@@ -168,8 +188,9 @@ export function normalizeProvider(input, existing = null) {
     if (out.apiKey.length > MAX_KEY_LENGTH) throw new Error('The API key is too long');
     out.countries = countries(merged.countries);
   } else {
-    out.socksPort = clampInt(merged.socksPort, 0, 65535, 9250);
-    if (out.socksPort < 1024) throw new Error('Enter a local port between 1024 and 65535 (default 9250)');
+    const port = merged.socksPort === undefined || merged.socksPort === '' ? 9250 : Number(merged.socksPort);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Enter a local port between 1024 and 65535 (default 9250)');
+    out.socksPort = port;
     out.exitCountries = countries(merged.exitCountries);
   }
   return out;

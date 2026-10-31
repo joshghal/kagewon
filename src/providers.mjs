@@ -40,6 +40,7 @@ function staticEntry(provider, host, port, user, pass) {
 function torEntry(p) {
   return {
     kind: 'gateway',
+    viaTor: true, // its health depends on OUR Tor still running, not just on the port accepting connections
     providerId: p.id,
     providerName: p.name,
     host: '127.0.0.1',
@@ -66,6 +67,7 @@ const validProxy = (x, allowLocal = false) => isUsableHost(x?.proxy_address, all
 
 /** Reads a JSON body but gives up beyond a fixed size, so a hostile or broken server cannot exhaust memory. */
 async function readJsonCapped(res) {
+  if (!res.body) throw new Error('Webshare sent an empty answer'); // for example a 204
   const reader = res.body.getReader();
   const chunks = [];
   let size = 0;
@@ -159,22 +161,25 @@ export async function loadProvider(p, env, ctx) {
   return [torEntry(p)];
 }
 
-function curlIp(proxyUrl) {
+function curlIp(proxyUrl, proxyUser = null) {
   const urls = ['https://api.ipify.org', 'https://icanhazip.com'];
   const attempt = i => new Promise((resolve, reject) => {
-    // -q ignores ~/.curlrc and the empty environment ignores NO_PROXY and friends, so the check cannot skip the proxy
-    execFile(CURL, ['-q', '-sSf', '-m', '20', '-x', proxyUrl, urls[i]], { env: {} }, (err, stdout, stderr) => {
+    // -q ignores ~/.curlrc and the empty environment ignores NO_PROXY and friends, so the check cannot skip the proxy.
+    // A proxy login is given on standard input (-K -), so it never appears in the process list.
+    const args = ['-q', '-sSf', '-m', '20', '-x', proxyUrl, ...(proxyUser ? ['-K', '-'] : []), urls[i]];
+    const child = execFile(CURL, args, { env: {} }, (err, stdout, stderr) => {
       const ip = stdout.trim();
       if (!err && /^[0-9a-f:.]{3,45}$/i.test(ip)) return resolve(ip);
       if (i + 1 < urls.length) return attempt(i + 1).then(resolve, reject);
       reject(new Error((stderr || err?.message || 'No answer').replace(/^curl: \(\d+\)\s*/, '').trim()));
     });
+    if (proxyUser) child.stdin.end(`proxy-user = "${proxyUser}"\n`);
   });
   return attempt(0);
 }
 
 /** The IP that the exit-IP check site sees when going through the given local proxy. */
-export const fetchIp = localProxyUrl => curlIp(localProxyUrl);
+export const fetchIp = (localProxyUrl, proxyUser) => curlIp(localProxyUrl, proxyUser);
 
 /** Loads a provider, then fetches the exit IP through one of its proxies. */
 export async function testProvider(p, env, ctx) {
@@ -182,11 +187,17 @@ export async function testProvider(p, env, ctx) {
   const entries = await loadProvider(p, env, ctx);
   const entry = entries[Math.floor(Math.random() * entries.length)];
   const upstream = entry.urlFor(entry.hasSession ? randomSession() : null);
-  // A throwaway local proxy lets curl use any upstream type (HTTP or SOCKS) with credentials.
-  const tmp = new Server({ host: '127.0.0.1', port: 0, prepareRequestFunction: () => ({ upstreamProxyUrl: upstream }) });
+  // A throwaway local proxy lets curl use any upstream type (HTTP or SOCKS) with credentials. It exists for the length of the
+  // test only, and asks for a one-time password, so no other program on this Mac can use it to reach the provider.
+  const secret = crypto.randomBytes(16).toString('hex');
+  const tmp = new Server({
+    host: '127.0.0.1',
+    port: 0,
+    prepareRequestFunction: ({ password }) => password === secret ? { upstreamProxyUrl: upstream } : { requestAuthentication: true, failMsg: 'Proxy login required' },
+  });
   await tmp.listen();
   try {
-    const ip = await fetchIp(`http://127.0.0.1:${tmp.port}`);
+    const ip = await fetchIp(`http://127.0.0.1:${tmp.port}`, `test:${secret}`);
     return { ok: true, count: entries.length, ip, ms: Date.now() - t0 };
   } finally {
     await tmp.close(true);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { Manager } from '../src/manager.mjs';
 import { manager, tempDir } from './helpers.mjs';
@@ -8,7 +9,7 @@ import { normalizeProvider, MAX_PROVIDERS } from '../src/config.mjs';
 
 test('expired per-site records are removed, and the table cannot grow without limit', () => {
   const m = manager();
-  m.config.stickyMinutes = 1;
+  m.config.stickySeconds = 60;
   m.pick('old.example.com');
   m.sticky.get('old.example.com').assigned -= 5 * 60_000;
   m.prune();
@@ -75,4 +76,41 @@ test('a provider cannot be tested while the proxy is still starting', async () =
   const r = await m.test({ type: 'webshare', apiKey: 'k'.repeat(24) });
   assert.equal(r.ok, false);
   assert.match(r.error, /finish starting/);
+});
+
+test('while starting, the status says which step the helper is on, and the log records how long it took', async () => {
+  const m = manager(0);
+  m.config.port = 0; // any free port
+  m.config.providers[0].enabled = true;
+  const alive = net.createServer(sock => sock.destroy());
+  await new Promise(r => alive.listen(0, '127.0.0.1', r));
+  const entry = { key: 'k0', providerId: 'p1', providerName: 'P', label: 'proxy0', kind: 'static', hasSession: false, urlFor: () => 'http://x', host: '127.0.0.1', port: alive.address().port };
+  let release;
+  const gate = new Promise(r => { release = r; });
+  m.loader = async () => { await gate; return [entry]; };
+  const lines = [];
+  m.log = (level, msg) => lines.push(msg);
+
+  assert.equal(m.status().stage, null);
+  const started = m.start();
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(m.status().state, 'starting');
+  assert.equal(m.status().stage, 'loading', 'waiting for the provider lists');
+  release();
+  await started;
+  assert.equal(m.status().state, 'running');
+  assert.equal(m.status().stage, null, 'no step is reported once it is running');
+  assert.ok(Array.isArray(m.status().bypass) && m.status().bypass.includes('localhost'), 'the helper tells the app which bypass list to use');
+  assert.ok(lines.some(l => /Proxy listening .* ready in \d+\.\d s: provider lists \d+\.\d s, health check \d+\.\d s/.test(l)), lines.join(' | '));
+  await m.stop();
+  await new Promise(r => alive.close(r));
+});
+
+test('a failed start clears the step', async () => {
+  const m = manager(0);
+  m.config.providers[0].enabled = true;
+  m.loader = async () => { throw new Error('The provider is down'); };
+  await assert.rejects(m.start(), /./);
+  assert.equal(m.status().stage, null);
+  assert.equal(m.status().state, 'stopped');
 });

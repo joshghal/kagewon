@@ -8,7 +8,7 @@ import { DEFAULT_SETTINGS } from '../src/config.mjs';
 export function manager(entryCount = 20, kind = 'static') {
   const provider = { id: 'p1', type: 'webshare', name: 'P', enabled: true, weight: 1 };
   // a private folder, so a test can never touch the real config.json
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-test-'));
+  const dir = tempDir();
   const m = new Manager({ dir, config: { ...DEFAULT_SETTINGS, providers: [provider] } });
   const entries = Array.from({ length: entryCount }, (_, i) => ({
     key: `k${i}`, providerId: 'p1', providerName: 'P', label: `proxy${i}`, kind,
@@ -20,4 +20,6 @@ export function manager(entryCount = 20, kind = 'static') {
   return m;
 }
 
-export const tempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-test-'));
+const made = [];
+process.on('exit', () => { for (const d of made) try { fs.rmSync(d, { recursive: true, force: true }); } catch {} });
+export const tempDir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-test-')); made.push(d); return d; };

@@ -14,10 +14,13 @@ const locks = new Map(); // providerId -> the start or restart that is currently
 const settingsKey = p => `${p.socksPort}|${(p.exitCountries ?? []).join(',')}`;
 
 export function findTor() {
-  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(d => path.join(d, 'tor'));
+  // A relative PATH entry would make the result depend on the current folder, so only absolute ones count, and a file
+  // that anybody can write to is never run.
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(d => path.isAbsolute(d)).map(d => path.join(d, 'tor'));
   for (const file of [...dirs, ...FALLBACK_PATHS]) {
     try {
-      if (!fs.statSync(file).isFile()) continue;
+      const st = fs.statSync(file);
+      if (!st.isFile() || (st.mode & 0o002)) continue; // not a file, or writable by everyone
       fs.accessSync(file, fs.constants.X_OK);
       return file;
     } catch {}
@@ -52,7 +55,8 @@ function spawnTor(p, dir, log, onExit) {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   // Tor gets only what it needs: nothing from our environment, such as the control token.
   const env = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' };
-  const proc = spawn(bin, ['-f', writeTorrc(p, dataDir), '--ignore-missing-torrc'], { stdio: ['ignore', 'pipe', 'pipe'], env });
+  // Only our own torrc counts: an empty defaults file keeps a torrc-defaults from adding options such as a ControlPort.
+  const proc = spawn(bin, ['-f', writeTorrc(p, dataDir), '--defaults-torrc', '/dev/null', '--ignore-missing-torrc'], { stdio: ['ignore', 'pipe', 'pipe'], env });
   allProcs.add(proc);
   proc.once('exit', () => allProcs.delete(proc));
   const pidFile = path.join(dataDir, 'tor.pid');
@@ -61,6 +65,7 @@ function spawnTor(p, dir, log, onExit) {
   const entry = { proc, key: settingsKey(p), ready: null, onExit };
   entry.ready = new Promise((resolve, reject) => {
     let last = '';
+    let portTaken = false;
     let milestone = 0;
     let done = false;
     const finish = err => {
@@ -79,6 +84,7 @@ function spawnTor(p, dir, log, onExit) {
         const l = line.trim();
         if (!l) continue;
         last = l.replace(/^.*?\[(notice|warn|err)\]\s*/, '');
+        if (/Could not bind to .*Address already in use/i.test(l)) portTaken = true;
         const m = l.match(/Bootstrapped (\d+)%/);
         if (m) {
           const pct = Number(m[1]);
@@ -96,7 +102,7 @@ function spawnTor(p, dir, log, onExit) {
       const unexpected = instances.get(p.id) === entry; // an intentional stop removes the entry first
       if (unexpected) instances.delete(p.id);
       try { fs.rmSync(pidFile, { force: true }); } catch {}
-      if (!done) finish(new Error(last || `Tor exited (${signal ?? `code ${code}`})`));
+      if (!done) finish(new Error(portTaken ? `Port ${p.socksPort} is already in use by another program. Choose another port for this provider.` : last || `Tor exited (${signal ?? `code ${code}`})`));
       else if (unexpected) {
         log('warn', 'Tor stopped unexpectedly');
         entry.onExit?.(p.id); // so its entry leaves the pool instead of being served by whatever binds the port next
@@ -146,6 +152,10 @@ async function ensureTorNow(p, dir, log, onExit) {
     throw err;
   }
   if (fresh) await warmUp(p.socksPort);
+  // It can have died, or been stopped, while we were warming it up. Then there is nothing on that port to hand out.
+  if (instances.get(p.id) !== entry || entry.proc.exitCode !== null || entry.proc.signalCode !== null) {
+    throw new Error('Tor stopped while it was starting');
+  }
 }
 
 export const hasTor = id => instances.has(id);

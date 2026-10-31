@@ -118,3 +118,64 @@ test('a config file that is readable by others is made private when it is loaded
   loadConfig(dir);
   assert.equal(fs.statSync(configPath(dir)).mode & 0o777, 0o600);
 });
+
+test('provider names are plain visible text: line breaks and control characters cannot forge log lines', () => {
+  const p = normalizeProvider({ type: 'webshare', apiKey: 'k'.repeat(24), name: 'x\n[notice] Control API listening\t\u0007line' });
+  assert.equal(p.name, 'x [notice] Control API listening line');
+});
+
+test('a Tor port that is out of range or not a number is rejected, not silently changed', () => {
+  for (const socksPort of [70000, 80, 1023, 'abc', 9250.5, -1]) assert.throws(() => normalizeProvider({ type: 'tor', socksPort }), /between 1024 and 65535/, String(socksPort));
+  assert.equal(normalizeProvider({ type: 'tor' }).socksPort, 9250, 'a missing port is the default');
+  assert.equal(normalizeProvider({ type: 'tor', socksPort: '9300' }).socksPort, 9300);
+});
+
+test('a copy of config.json kept after a problem does not contain the keys', () => {
+  const dir = tempDir();
+  const key = 'SECRETKEY-' + 'z'.repeat(20);
+  fs.writeFileSync(configPath(dir), JSON.stringify({ providers: [{ type: 'webshare', apiKey: key }, { type: 'bogus', apiKey: key }] }), { mode: 0o600 });
+  const cfg = loadConfig(dir);
+  assert.equal(cfg.providers.length, 1, 'the invalid provider was dropped');
+  const backups = fs.readdirSync(dir).filter(n => n.startsWith('config.json.broken-'));
+  assert.equal(backups.length, 1);
+  const text = fs.readFileSync(path.join(dir, backups[0]), 'utf8');
+  assert.equal(text.includes(key), false, 'the key is not in the copy');
+  assert.match(text, /\[removed\]/);
+
+  // an unreadable file is moved aside and redacted too
+  const dir2 = tempDir();
+  fs.writeFileSync(configPath(dir2), `{"providers": [ {"apiKey": "${key}"`, { mode: 0o600 });
+  loadConfig(dir2);
+  const moved = fs.readdirSync(dir2).find(n => n.startsWith('config.json.broken-'));
+  assert.equal(fs.readFileSync(path.join(dir2, moved), 'utf8').includes(key), false);
+});
+
+test('temporary files from an interrupted write are removed when the config is loaded', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'config.json.12345.tmp'), '{"apiKey":"old"}', { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'unrelated.tmp'), 'keep');
+  loadConfig(dir);
+  assert.equal(fs.existsSync(path.join(dir, 'config.json.12345.tmp')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'unrelated.tmp')), true);
+});
+
+test('a config file from before 30 second steps (whole minutes) still loads, as seconds', () => {
+  const dir = tempDir();
+  fs.writeFileSync(configPath(dir), JSON.stringify({ stickyMinutes: 7, providers: [] }), { mode: 0o600 });
+  const cfg = loadConfig(dir);
+  assert.equal(cfg.stickySeconds, 420);
+  assert.equal('stickyMinutes' in cfg, false);
+
+  const dir2 = tempDir();
+  fs.writeFileSync(configPath(dir2), JSON.stringify({ stickySeconds: 45, stickyMinutes: 7, providers: [] }), { mode: 0o600 });
+  assert.equal(loadConfig(dir2).stickySeconds, 45, 'the new value wins');
+
+  const dir3 = tempDir();
+  fs.writeFileSync(configPath(dir3), JSON.stringify({ stickyMinutes: 99999, providers: [] }), { mode: 0o600 });
+  assert.equal(loadConfig(dir3).stickySeconds, 600, 'an invalid value falls back to the default');
+});
+
+test('the default sticky time is 10 minutes', () => {
+  assert.equal(normalizeSettings({}).stickySeconds, undefined, 'nothing is changed when nothing is given');
+  assert.equal(loadConfig(tempDir()).stickySeconds, 600);
+});

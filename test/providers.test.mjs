@@ -135,3 +135,12 @@ test('a redirect to another host is refused, and one to the same host is followe
     assert.equal(entries.length, 1);
   } finally { await new Promise(r => sameHostApi.close(r)); }
 });
+
+test('an empty answer from Webshare gives a clear error, not a crash message', async () => {
+  const server = http.createServer((req, res) => { res.writeHead(204); res.end(); });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    await assert.rejects(loadProvider(webshare(), { WEBSHARE_API_BASE: `http://127.0.0.1:${server.address().port}` }, ctx), /empty answer|HTTP 204|Webshare/);
+    await assert.rejects(loadProvider(webshare(), { WEBSHARE_API_BASE: `http://127.0.0.1:${server.address().port}` }, ctx), err => !/null/.test(err.message));
+  } finally { await new Promise(r => server.close(r)); }
+});

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Server, RequestError } from 'proxy-chain';
 import { saveConfig, normalizeProvider, normalizeSettings, maskProvider, MAX_PROVIDERS } from './config.mjs';
 import { loadProvider, testProvider, fetchIp, randomSession } from './providers.mjs';
-import { siteKey, isInternalHost, isValidConnectTarget } from './hosts.mjs';
+import { siteKey, isInternalHost, isValidConnectTarget, MACOS_BYPASS } from './hosts.mjs';
 import { hasTor, pruneTor, stopTor, stopAllTor } from './tor.mjs';
 
 const BAD_COOLDOWN_MS = 5 * 60_000;
@@ -15,6 +15,10 @@ const GIVE_UP_AFTER_PROXIES = 3; // a site refused by this many different proxie
 const HEALTH_MS = 60_000;
 const MAX_LOG = 300;
 const MAX_STICKY = 5000; // a hostile client could otherwise make the per-site records grow without limit
+const HOST_COOLDOWN_MS = 2 * 60_000; // a proxy is avoided this long for ONE host name that has never worked
+const ESTABLISHED_TTL_MS = 6 * 3600_000; // how long a host name counts as "known to work"
+const BIND_RETRY_MS = 6000; // the app may still be releasing the port when the proxy starts
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function tcpAlive(host, port) {
   return new Promise(resolve => {
@@ -42,6 +46,7 @@ export class Manager {
     this.listenPort = null; // the port actually in use while running
 
     this.state = 'stopped'; // stopped | starting | running
+    this.stage = null; // while starting: loading | checking | listening, so the app can show progress
     this.lastError = null;
     this.runtime = new Map(); // providerId -> { entries, status, error, loadedAt, skipped }
     this.entryByKey = new Map();
@@ -53,7 +58,15 @@ export class Manager {
     this.blocked = new Map(); // site -> expiry: refused by many proxies, so we stop rotating for it
     this.lastFailLog = new Map(); // site -> time of the last log line about it
     this.conns = new Map(); // client connection id -> { site, assigned }: connections living under a sticky pin
-    this.sticky = new Map(); // site -> { key, session, assigned, provider, label }
+    this.sticky = new Map(); // site -> { key, session, assigned, provider, label, confirmed }
+    // Host names are the unit of failure. A web page can make the browser ask for host names that do not exist
+    // (nx.yourbank.example), and the provider refuses those tunnels. Only a host name that has worked before is allowed
+    // to affect the pinned IP of its site or the standing of a proxy; a name that never worked only gets its own detour.
+    this.gen = 0; // counts starts and stops, so a start that was stopped meanwhile can tell
+    this.established = new Map(); // host name -> time it last worked through a proxy
+    this.hostBad = new Map(); // `${host}|${key}` -> expiry: this proxy failed for this host name, which has never worked
+    this.hostFails = new Map(); // host -> Map(key -> time)
+    this.hostBlocked = new Map(); // host -> expiry: refused by many proxies
     this.tags = new WeakMap();
     this.server = null;
     this.timers = [];
@@ -81,12 +94,13 @@ export class Manager {
 
   get verbose() { return this.config.verbose; }
   get refreshMs() { return this.config.refreshMinutes * 60_000; }
+  get stickyMs() { return this.config.stickySeconds * 1000; }
 
   ctx() {
     return {
       dir: this.dir,
       log: (level, msg) => this.log(level, msg),
-      stickyMinutes: () => this.config.stickyMinutes,
+      stickySeconds: () => this.config.stickySeconds,
       onTorExit: id => this.torExited(id),
     };
   }
@@ -100,14 +114,19 @@ export class Manager {
     return (this.bad.get(e.key) ?? 0) > Date.now();
   }
 
+  /** A Tor entry whose Tor is not running: its port is free, and whatever binds it next would receive the traffic. */
+  torGone(e) {
+    return Boolean(e.viaTor) && !hasTor(e.providerId);
+  }
+
   /** Should a NEW connection avoid this proxy? One missed health probe is enough. */
   isBad(e) {
-    return this.probeFails.has(e.key) || this.isBenched(e);
+    return this.probeFails.has(e.key) || this.isBenched(e) || this.torGone(e);
   }
 
   /** Should an EXISTING sticky pin be dropped? A single missed probe is common, so it takes two in a row. */
   isDead(e) {
-    return (this.probeFails.get(e.key) ?? 0) >= 2 || this.isBenched(e);
+    return (this.probeFails.get(e.key) ?? 0) >= 2 || this.isBenched(e) || this.torGone(e);
   }
 
   /** Loads one provider. A failure keeps the previous list and schedules the next attempt later and later (1, 2, 4, 8, 15 min). */
@@ -128,7 +147,7 @@ export class Manager {
         // whatever binds that port next would receive the logins and every destination, so it must leave the pool.
         rt.entries = [];
         this.rebuildIndex();
-        for (const [site, s] of this.sticky) if (!this.entryByKey.has(s.key)) this.sticky.delete(site);
+        this.dropStalePins('Tor is not running');
       }
     }
   }
@@ -139,11 +158,26 @@ export class Manager {
     for (const id of [...this.runtime.keys()]) if (!enabled.some(p => p.id === id)) this.runtime.delete(id);
     await pruneTor(new Set(enabled.filter(p => p.type === 'tor').map(p => p.id)));
     this.rebuildIndex();
+    this.dropStalePins('a provider was turned off or removed');
   }
 
   rebuildIndex() {
     this.entryByKey = new Map();
     for (const rt of this.runtime.values()) for (const e of rt.entries) this.entryByKey.set(e.key, e);
+  }
+
+  /** Forgets the pins that point at a proxy that is no longer in the pool, and closes the connections that used them. */
+  dropStalePins(why) {
+    const gone = new Set();
+    for (const [site, s] of this.sticky) if (!this.entryByKey.has(s.key)) { this.sticky.delete(site); gone.add(site); }
+    if (gone.size) this.cutConnections(c => gone.has(c.site), why);
+  }
+
+  /** A provider that is turned off, deleted or changed leaves the pool at once, not when the other providers finish loading. */
+  dropFromPool(id) {
+    if (!this.runtime.delete(id)) return;
+    this.rebuildIndex();
+    this.dropStalePins('a provider was turned off, removed or changed');
   }
 
   /** Tor died: take it out of the pool, so nothing that later binds its port can receive traffic meant for Tor. */
@@ -154,13 +188,14 @@ export class Manager {
     rt.status = 'error';
     rt.error = 'Tor stopped unexpectedly. Trying to start it again.';
     this.rebuildIndex();
-    for (const [site, s] of this.sticky) if (!this.entryByKey.has(s.key)) this.sticky.delete(site);
+    this.dropStalePins('Tor stopped');
   }
 
   async checkHealth() {
     const failed = new Set();
     await mapLimit([...this.entryByKey.values()], 50, async e => {
-      if (!(await tcpAlive(e.host, e.port))) failed.add(e.key);
+      // "Alive" means the port accepts connections, and for Tor that our own Tor is the one listening on it.
+      if (this.torGone(e) || !(await tcpAlive(e.host, e.port))) failed.add(e.key);
     });
     const next = new Map([...failed].map(k => [k, (this.probeFails.get(k) ?? 0) + 1]));
     const label = k => this.entryByKey.get(k)?.label ?? 'a proxy';
@@ -185,10 +220,21 @@ export class Manager {
       }
     }
     for (const [k, t] of this.lastFailLog) if (now - t > FAIL_WINDOW_MS) this.lastFailLog.delete(k);
+    for (const [h, t] of this.established) if (now - t > ESTABLISHED_TTL_MS) this.established.delete(h);
+    for (const m of [this.hostBad, this.hostBlocked]) for (const [k, t] of m) if (t <= now) m.delete(k);
+    for (const [h, inner] of this.hostFails) {
+      for (const [k, t] of inner) if (now - t > FAIL_WINDOW_MS) inner.delete(k);
+      if (!inner.size) this.hostFails.delete(h);
+    }
     // Expired sticky records are dead weight, and they are a browsing history that should not linger.
-    const stickyMs = this.config.stickyMinutes * 60_000;
+    const stickyMs = this.stickyMs;
     for (const [site, s] of this.sticky) if (now - s.assigned >= stickyMs) this.sticky.delete(site);
-    for (const m of [this.siteBad, this.siteFails, this.proxyFails, this.blocked, this.lastFailLog]) {
+    this.capMaps();
+  }
+
+  capMaps() {
+    for (const m of [this.siteBad, this.siteFails, this.proxyFails, this.blocked, this.lastFailLog, this.established,
+      this.hostBad, this.hostFails, this.hostBlocked]) {
       while (m.size > MAX_STICKY) m.delete(m.keys().next().value);
     }
   }
@@ -229,51 +275,99 @@ export class Manager {
   async start() {
     if (this.state === 'running') return;
     if (this.state === 'starting') throw new Error('The proxy is already starting');
+    const gen = ++this.gen;
     this.state = 'starting';
+    this.stage = 'loading';
     this.lastError = null;
+    const t0 = Date.now();
+    let tLoaded = t0;
+    let tChecked = t0;
+    let server = null;
+    // stop() may run while we wait for a provider or for the port; then this start must not carry on.
+    const current = () => { if (gen !== this.gen) throw new Error('The proxy was stopped while it was starting'); };
     try {
       if (!this.config.providers.some(p => p.enabled)) {
         throw new Error('No provider is enabled. Add one in the Providers tab.');
       }
       await this.loadAll();
+      current();
+      tLoaded = Date.now();
       if (!this.entryByKey.size) throw new Error(this.runtimeErrors() || 'No usable proxies');
+      this.stage = 'checking';
       await this.checkHealth();
+      current();
+      tChecked = Date.now();
+      if (![...this.entryByKey.values()].some(e => !this.isBad(e))) {
+        throw new Error(`None of the ${this.entryByKey.size} proxies could be reached. Check your connection, then try again.`);
+      }
 
+      this.stage = 'listening';
       const port = this.config.port;
-      this.server = new Server({
-        host: this.host,
-        port,
-        prepareRequestFunction: ({ request, hostname, port: targetPort, isHttp, connectionId }) => {
-          // proxy-chain sends the raw CONNECT target upstream but reads a parsed copy, so anything that could be read
-          // two ways (user@host, escapes, odd characters) is refused outright.
-          if (!isHttp && !isValidConnectTarget(request.url)) throw new RequestError('Malformed CONNECT target', 400);
-          if (String(hostname).length > 253) throw new RequestError('Host name too long', 400);
-          // This Mac and its network are never sent to a provider: it would see the request, and could not reach it.
-          if (isInternalHost(hostname)) throw new RequestError('Local and private addresses are not sent through the proxy', 403);
-          const site = siteKey(hostname);
-          const { entry, session, assigned } = this.pick(site);
-          this.trackConnection(connectionId, site, assigned);
-          const tag = { site, key: entry.key, session, port: Number(targetPort) };
-          if (isHttp) this.tags.set(request, tag);
-          return { upstreamProxyUrl: entry.urlFor(session), customTag: tag };
-        },
-      });
-      this.server.on('connectionClosed', ({ connectionId }) => this.conns.delete(connectionId));
-      this.server.on('tunnelConnectFailed', ({ customTag, response }) => customTag && this.onFailure(customTag, response?.statusCode));
-      this.server.on('requestFailed', ({ request }) => {
-        const tag = this.tags.get(request);
-        if (tag) this.onFailure(tag, undefined);
-      });
-      await this.server.listen();
+      const makeServer = () => {
+        const s = new Server({
+          host: this.host,
+          port,
+          prepareRequestFunction: ({ request, hostname, port: targetPort, isHttp, connectionId }) => {
+            // proxy-chain sends the raw CONNECT target upstream but reads a parsed copy, so anything that could be read
+            // two ways (user@host, escapes, odd characters) is refused outright.
+            if (!isHttp && !isValidConnectTarget(request.url)) throw new RequestError('Malformed CONNECT target', 400);
+            if (isHttp) this.checkAbsoluteTarget(request);
+            if (String(hostname).length > 253) throw new RequestError('Host name too long', 400);
+            // This Mac and its network are never sent to a provider: it would see the request, and could not reach it.
+            if (isInternalHost(hostname)) {
+              this.logOncePerMinute(String(hostname).toLowerCase().slice(0, 100), 'A local or private address was not sent through the proxy');
+              throw new RequestError('Local and private addresses are not sent through the proxy', 403);
+            }
+            const host = String(hostname).toLowerCase();
+            const site = siteKey(hostname);
+            const { entry, session, assigned, detour } = this.pick(site, host);
+            this.trackConnection(connectionId, site, assigned);
+            const tag = { site, host, key: entry.key, session, port: Number(targetPort), detour };
+            if (isHttp) this.tags.set(request, tag);
+            return { upstreamProxyUrl: entry.urlFor(session), customTag: tag };
+          },
+        });
+        s.on('connectionClosed', ({ connectionId }) => this.conns.delete(connectionId));
+        s.on('tunnelConnectFailed', ({ customTag, response }) => customTag && this.onFailure(customTag, response?.statusCode));
+        s.on('tunnelConnectResponded', ({ customTag }) => customTag && this.onSuccess(customTag));
+        s.on('requestFailed', ({ request }) => {
+          const tag = this.tags.get(request);
+          if (tag) this.onFailure(tag, undefined);
+        });
+        return s;
+      };
+      // With the kill switch the app holds this port until we are about to bind it, so give it a moment to let go.
+      const deadline = Date.now() + BIND_RETRY_MS;
+      for (;;) {
+        server = makeServer();
+        try {
+          await server.listen();
+          break;
+        } catch (err) {
+          await server.close(true).catch(() => {});
+          server = null;
+          if (err.code !== 'EADDRINUSE' || Date.now() >= deadline) throw err;
+          await sleep(150);
+          current();
+        }
+      }
+      current();
+      this.server = server;
       this.listenPort = port;
     } catch (err) {
-      this.server = null;
-      this.state = 'stopped';
-      await stopAllTor(); // a failed start must not leave Tor running
-      this.runtime.clear();
-      this.entryByKey.clear();
-      this.lastError = err.code === 'EADDRINUSE' ? `Port ${this.config.port} is already in use` : err.message;
-      throw new Error(this.lastError);
+      const superseded = gen !== this.gen;
+      if (server) await server.close(true).catch(() => {});
+      if (!superseded) {
+        this.server = null;
+        this.state = 'stopped';
+        this.stage = null;
+        this.runtime.clear();
+        this.entryByKey.clear();
+      }
+      // stop() has already cleaned up in the superseded case, except for anything it could not see yet (a Tor that came up late).
+      if (!superseded || this.state === 'stopped') await stopAllTor(); // a failed start must not leave Tor running
+      this.lastError = superseded ? this.lastError : err.code === 'EADDRINUSE' ? `Port ${this.config.port} is already in use` : err.message;
+      throw new Error(superseded ? err.message : this.lastError);
     }
     this.timers = [
       setInterval(() => this.reload().catch(() => {}), this.refreshMs),
@@ -282,39 +376,69 @@ export class Manager {
     ];
     this.timers.forEach(t => t.unref());
     this.state = 'running';
-    this.log('info', `Proxy listening on ${this.host}:${this.listenPort} (rotation: ${this.config.rotation})`);
+    this.stage = null;
+    const secs = ms => (ms / 1000).toFixed(1);
+    this.log('info', `Proxy listening on ${this.host}:${this.listenPort} (rotation: ${this.config.rotation}), ready in ${secs(Date.now() - t0)} s: ` +
+      `provider lists ${secs(tLoaded - t0)} s, health check ${secs(tChecked - tLoaded)} s`);
+  }
+
+  /**
+   * A plain HTTP request names its target twice (the request line and the Host header) and a provider may read the line
+   * differently from us. Only an unambiguous absolute target whose Host header agrees with it is forwarded.
+   */
+  checkAbsoluteTarget(request) {
+    const m = /^http:\/\/([^/]*)(\/.*)?$/i.exec(String(request.url));
+    if (!m || m[1] === '' || /[?#@\\%\s]/.test(m[1])) throw new RequestError('Malformed request target', 400);
+    const bare = h => String(h).toLowerCase().replace(/:\d*$/, '');
+    const given = request.headers?.host;
+    if (given !== undefined && bare(given) !== bare(m[1])) throw new RequestError('The Host header does not match the request target', 400);
+    // proxy-chain reads the URL the way a browser would before it calls us ("010.0.0.1" becomes 8.0.0.1), so the filter must
+    // also judge the host exactly as the client wrote it. Otherwise a spelling that other programs read as 10.0.0.1 gets through.
+    const written = bare(m[1]);
+    if (isInternalHost(written)) {
+      this.logOncePerMinute(written.slice(0, 100), 'A local or private address was not sent through the proxy');
+      throw new RequestError('Local and private addresses are not sent through the proxy', 403);
+    }
   }
 
   async stop() {
+    this.gen++; // a start that is still waiting for something notices and gives up
     this.timers.forEach(clearInterval);
     this.timers = [];
     if (this.server) await this.server.close(true).catch(() => {});
     this.server = null;
     this.listenPort = null;
     this.state = 'stopped';
+    this.stage = null;
     await stopAllTor();
     this.sticky.clear();
-    for (const m of [this.bad, this.probeFails, this.siteBad, this.siteFails, this.proxyFails, this.blocked, this.lastFailLog, this.conns]) m.clear();
+    for (const m of [this.bad, this.probeFails, this.siteBad, this.siteFails, this.proxyFails, this.blocked, this.lastFailLog, this.conns,
+      this.established, this.hostBad, this.hostFails, this.hostBlocked]) m.clear();
     this.runtime.clear();
     this.entryByKey.clear();
     this.logs = []; // the in-memory log holds site names, so it ends with the session
     this.log('info', 'Proxy stopped');
   }
 
-  pick(site) {
+  pick(site, host = site) {
     const now = Date.now();
     const sticky = this.config.rotation === 'sticky';
+    let detour = false;
     if (sticky) {
       const s = this.sticky.get(site);
       // Age is checked against the CURRENT sticky time, so changing the setting takes effect at once.
-      const entry = s && now - s.assigned < this.config.stickyMinutes * 60_000 ? this.entryByKey.get(s.key) : null;
-      if (entry && !this.isDead(entry)) return { entry, session: s.session, assigned: s.assigned };
+      const entry = s && now - s.assigned < this.stickyMs ? this.entryByKey.get(s.key) : null;
+      if (entry && !this.isDead(entry)) {
+        if (!this.hostAvoids(host, entry.key)) return { entry, session: s.session, assigned: s.assigned, detour: false };
+        detour = true; // this very host name failed on the pinned proxy: use another one for it, and leave the pin alone
+      }
     }
 
     // Choose a provider by its traffic share, then a random healthy proxy inside it. A proxy that
     // refused this very site is avoided, unless the site is blocked everywhere (then rotating is pointless).
     const siteBlocked = (this.blocked.get(site) ?? 0) > now;
-    const usable = e => !this.isBad(e) && (siteBlocked || !this.siteBad.has(`${site}|${e.key}`));
+    const hostBlocked = (this.hostBlocked.get(host) ?? 0) > now;
+    const usable = e => !this.isBad(e) && (siteBlocked || !this.siteBad.has(`${site}|${e.key}`)) && (hostBlocked || !this.hostAvoids(host, e.key));
     const buildGroups = ok => {
       const out = [];
       for (const p of this.config.providers) {
@@ -328,7 +452,8 @@ export class Manager {
     let groups = buildGroups(usable);
     if (!groups.length) groups = buildGroups(e => !this.isBad(e));
     if (!groups.length) {
-      const all = [...this.entryByKey.values()];
+      // Last resort: any proxy, but never a Tor whose port nothing of ours owns.
+      const all = [...this.entryByKey.values()].filter(e => !this.torGone(e));
       if (!all.length) throw new RequestError('No proxies available', 503);
       groups = [{ weight: 1, entries: all }];
     }
@@ -337,12 +462,51 @@ export class Manager {
     const entry = group.entries[Math.floor(Math.random() * group.entries.length)];
     const session = sticky && entry.hasSession ? (entry.newSession?.() ?? randomSession()) : null;
 
-    if (sticky) {
-      if (this.sticky.size >= MAX_STICKY) this.sticky.delete(this.sticky.keys().next().value);
-      this.sticky.set(site, { key: entry.key, session, assigned: now, provider: entry.providerName, label: entry.label });
-    }
+    if (sticky && !detour) this.setPin(site, { key: entry.key, session, assigned: now, provider: entry.providerName, label: entry.label, confirmed: false });
     if (this.verbose) this.log('info', `-> ${entry.providerName} ${entry.label}`, site);
-    return { entry, session, assigned: sticky ? now : null };
+    return { entry, session, assigned: sticky && !detour ? now : null, detour };
+  }
+
+  /**
+   * Stores a pin. A pin is "confirmed" once a tunnel through it has worked. When the table is full the oldest UNCONFIRMED pin
+   * goes first, so a page that asks for thousands of made-up host names cannot push out the pins of real sessions.
+   */
+  setPin(site, pin) {
+    if (!this.sticky.has(site) && this.sticky.size >= MAX_STICKY) {
+      let victim = null;
+      for (const [k, v] of this.sticky) if (!v.confirmed) { victim = k; break; }
+      this.sticky.delete(victim ?? this.sticky.keys().next().value);
+    }
+    this.sticky.set(site, pin);
+  }
+
+  hostAvoids(host, key) {
+    return (this.hostBad.get(`${host}|${key}`) ?? 0) > Date.now();
+  }
+
+  markEstablished(host) {
+    this.established.delete(host);
+    this.established.set(host, Date.now());
+    this.capMaps();
+  }
+
+  isEstablished(host) {
+    const t = this.established.get(host);
+    return t !== undefined && Date.now() - t < ESTABLISHED_TTL_MS;
+  }
+
+  /** A tunnel through a proxy worked: the host name is real, and the pin that carried it is no longer just a guess. */
+  onSuccess({ site, host = site, key, session, detour }) {
+    this.markEstablished(host);
+    this.hostBad.delete(`${host}|${key}`);
+    const pin = this.sticky.get(site);
+    if (pin && pin.key === key) { pin.confirmed = true; return; }
+    // The pinned proxy failed for this host but another one worked. If the pin never carried anything, it was only a guess:
+    // move the site to the proxy that works. A confirmed pin (a real session) is never moved by one host name.
+    const entry = this.entryByKey.get(key);
+    if (detour && entry && this.config.rotation === 'sticky' && (!pin || !pin.confirmed)) {
+      this.setPin(site, { key, session, assigned: Date.now(), provider: entry.providerName, label: entry.label, confirmed: true });
+    }
   }
 
   trackConnection(connectionId, site, assigned) {
@@ -369,7 +533,7 @@ export class Manager {
    */
   sweepConnections() {
     if (!this.config.rotateOpenConnections || this.config.rotation !== 'sticky') return 0;
-    const stickyMs = this.config.stickyMinutes * 60_000;
+    const stickyMs = this.stickyMs;
     const now = Date.now();
     return this.cutConnections(c => now - c.assigned >= stickyMs, 'the sticky time ended');
   }
@@ -386,12 +550,30 @@ export class Manager {
     this.log('warn', message, site);
   }
 
+  onUnknownHostFailure({ site, host, key, entry }, statusCode, now) {
+    const what = statusCode ?? 'error';
+    this.hostBad.set(`${host}|${key}`, now + HOST_COOLDOWN_MS);
+    const refusedBy = this.hostFails.get(host) ?? new Map();
+    refusedBy.set(key, now);
+    this.hostFails.set(host, refusedBy);
+    const n = [...refusedBy.values()].filter(t => now - t < FAIL_WINDOW_MS).length;
+    if ((this.hostBlocked.get(host) ?? 0) <= now && n >= GIVE_UP_AFTER_PROXIES) {
+      this.hostBlocked.set(host, now + SITE_COOLDOWN_MS);
+      this.log('warn', `A host was refused by ${n} different proxies (${what}); it may not exist, or the provider blocks it. Not trying more proxies for it for ${SITE_COOLDOWN_MS / 60_000} min.`, host);
+    } else {
+      this.logOncePerMinute(host, `${entry.label} refused a host (${what}); trying another proxy next time`);
+    }
+    const pin = this.sticky.get(site);
+    if (pin && pin.key === key && !pin.confirmed) this.sticky.delete(site);
+    this.capMaps();
+  }
+
   /**
    * A tunnel through a proxy failed. statusCode is what the proxy answered to our CONNECT, when it did.
    * Most failures are about ONE site (for example the provider blocks stripe.com), and must not take the
    * proxy away from every other site, because that changes the IP of sites that were working fine.
    */
-  onFailure({ site, key, port }, statusCode) {
+  onFailure({ site, host = site, key, port }, statusCode) {
     // Only ordinary web ports count. Otherwise a web page could request https://example.com:9/ to make the provider refuse
     // the tunnel and so throw away the pinned IP of the visitor's real session with example.com.
     if (port !== undefined && port !== 80 && port !== 443) return;
@@ -404,6 +586,14 @@ export class Manager {
       if (entry.kind === 'gateway') this.logOncePerMinute(site, `${entry.providerName} rejected the login (${statusCode}). Check the credentials.`);
       else this.bench(entry, `rejected the login (${statusCode})`);
       this.sticky.delete(site);
+      return;
+    }
+
+    // The same goes for host names: a page can ask for nx.yourbank.example, the provider refuses it, and that must not count
+    // against yourbank.example. Only a host name that has worked before can affect its site; one that never worked only gets
+    // a short detour of its own, and a pin that never carried anything (just a guess) is forgotten.
+    if (!this.isEstablished(host)) {
+      this.onUnknownHostFailure({ site, host, key, entry }, statusCode, now);
       return;
     }
 
@@ -467,8 +657,12 @@ export class Manager {
   async updateProvider(id, input) {
     const i = this.config.providers.findIndex(p => p.id === id);
     if (i < 0) throw new Error('Provider not found');
-    const p = normalizeProvider({ ...input, type: this.config.providers[i].type }, this.config.providers[i]);
+    const old = this.config.providers[i];
+    const p = normalizeProvider({ ...input, type: old.type }, old);
     this.config.providers[i] = p;
+    const torChanged = p.type === 'tor' && (old.socksPort !== p.socksPort || (old.exitCountries ?? []).join() !== (p.exitCountries ?? []).join());
+    // A provider that is turned off, or a Tor that is about to be restarted, must stop receiving traffic right now.
+    if (!p.enabled || torChanged) this.dropFromPool(p.id);
     this.persist();
     await this.afterProviderChange();
     return maskProvider(p);
@@ -478,6 +672,7 @@ export class Manager {
     const i = this.config.providers.findIndex(p => p.id === id);
     if (i < 0) throw new Error('Provider not found');
     const [removed] = this.config.providers.splice(i, 1);
+    this.dropFromPool(removed.id);
     this.persist();
     await this.afterProviderChange();
     if (removed.type === 'tor' && /^[a-z0-9-]{1,40}$/.test(removed.id)) {
@@ -514,7 +709,8 @@ export class Manager {
     } finally {
       this.testing = false;
       // A test must not leave Tor running in the background.
-      if (p.type === 'tor' && !torWasRunning && (this.state !== 'running' || p.id === 'test')) await stopTor(p.id);
+      // But not while a start is using it: only the proxy being fully stopped (or the private test instance) allows this.
+      if (p.type === 'tor' && !torWasRunning && (this.state === 'stopped' || p.id === 'test')) await stopTor(p.id);
     }
   }
 
@@ -540,7 +736,7 @@ export class Manager {
         },
       };
     });
-    const stickyMs = this.config.stickyMinutes * 60_000;
+    const stickyMs = this.stickyMs;
     const sites = [...this.sticky.entries()]
       .filter(([, s]) => now - s.assigned < stickyMs)
       .sort((a, b) => b[1].assigned - a[1].assigned)
@@ -548,8 +744,10 @@ export class Manager {
       .map(([site, s]) => ({ site, provider: s.provider, proxy: s.label, expiresIn: Math.round((s.assigned + stickyMs - now) / 1000) }));
     return {
       state: this.state,
+      stage: this.state === 'starting' ? this.stage : null,
       rotation: this.config.rotation,
-      stickyMinutes: this.config.stickyMinutes,
+      stickySeconds: this.config.stickySeconds,
+      stickyMinutes: Math.max(1, Math.ceil(this.config.stickySeconds / 60)), // for older apps that only know whole minutes
       port: this.config.port,
       listenPort: this.listenPort,
       refreshMinutes: this.config.refreshMinutes,
@@ -557,6 +755,7 @@ export class Manager {
       rotateOpenConnections: this.config.rotateOpenConnections,
       killSwitch: this.config.killSwitch,
       lastError: this.lastError,
+      bypass: MACOS_BYPASS,
       providers,
       sites,
     };

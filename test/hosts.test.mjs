@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { siteKey, isInternalHost, isValidConnectTarget } from '../src/hosts.mjs';
+import { siteKey, isInternalHost, isValidConnectTarget, MACOS_BYPASS } from '../src/hosts.mjs';
 
 test('siteKey groups subdomains but keeps registrable domains with a country suffix apart', () => {
   assert.equal(siteKey('cdn.example.com'), 'example.com');
@@ -38,9 +38,45 @@ test('a name that cannot be read is treated as internal, so odd spellings fail c
   for (const h of ['exa mple.com', 'a b', '%%', 'http://x']) assert.equal(isInternalHost(h), true, h);
 });
 
-test('public addresses written in odd ways are still public', () => {
-  for (const h of ['0x08.0x08.0x08.0x08', '134744072', '[2606:4700::1111]', 'EXAMPLE.com.', 'xn--bcher-kva.example']) {
+test('public addresses written in the normal way are public', () => {
+  for (const h of ['8.8.8.8', '8.8.8.8.', '[2606:4700::1111]', '2606:4700::1111', 'EXAMPLE.com.', 'xn--bcher-kva.example', 'be.de', 'BE.DE']) {
     assert.equal(isInternalHost(h), false, h);
+  }
+});
+
+test('number-like hosts that are not plain dotted decimal are refused: programs read them differently', () => {
+  // 010.0.0.1 is 8.0.0.1 to a browser (octal) but 10.0.0.1 to some resolvers; hex and single numbers differ the same way
+  for (const h of ['010.0.0.1', '0127.0.0.1', '0172.016.0.1', '0100.064.0.1', '010.1.1.1', '0x08.0x08.0x08.0x08', '134744072', '127.1', '0x7f.1']) {
+    assert.equal(isInternalHost(h), true, h);
+  }
+});
+
+test('IPv4 addresses carried inside IPv6, and special-use ranges, are refused', () => {
+  for (const h of ['2002:7f00:1::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '64:ff9b:1::7f00:1', '::ffff:0:7f00:1', '2001:db8::1', '198.18.0.1', '192.0.2.5', '203.0.113.9']) {
+    assert.equal(isInternalHost(h), true, h);
+  }
+  assert.equal(isInternalHost('::ffff:8.8.8.8'), false, 'a mapped PUBLIC address is still public');
+});
+
+test('every entry of the macOS bypass list is refused by the helper too, so the two lists cannot drift apart', () => {
+  const samples = entry => {
+    if (entry.startsWith('*.')) return [`device${entry.slice(1)}`];
+    const [base, bits] = entry.split('/');
+    if (!/^[0-9.]+$/.test(base)) return [base];
+    const o = base.split('.').map(Number);
+    while (o.length < 4) o.push(0);
+    const n = ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+    const size = bits === undefined ? 1 : 2 ** (32 - Number(bits));
+    const at = v => [v >>> 24, (v >>> 16) & 255, (v >>> 8) & 255, v & 255].join('.');
+    return [at(n), at(n + size - 1)];
+  };
+  for (const entry of MACOS_BYPASS) for (const h of samples(entry)) assert.equal(isInternalHost(h), true, `${entry} -> ${h}`);
+  assert.ok(MACOS_BYPASS.length >= 20);
+});
+
+test('unrelated tenants of shared hosting are different sites', () => {
+  for (const [a, b] of [['one.appspot.com', 'two.appspot.com'], ['x.onrender.com', 'y.onrender.com'], ['a.fly.dev', 'b.fly.dev'], ['s.myshopify.com', 't.myshopify.com']]) {
+    assert.notEqual(siteKey(a), siteKey(b), `${a} vs ${b}`);
   }
 });
 

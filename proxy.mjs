@@ -1,3 +1,4 @@
+import './src/safe-env.mjs'; // first: it must run before any library that reads DEBUG when it loads
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -25,7 +26,8 @@ process.stderr.on('error', () => {});
 
 const PARENT_PID = process.ppid; // read before anything slow, or a parent that dies early would go unnoticed
 const config = loadConfig(dir);
-const manager = new Manager({ dir, config, env });
+// WEBSHARE_API_BASE and similar overrides exist for tests and development: they are ignored unless KAGEWON_DEV=1.
+const manager = new Manager({ dir, config, env: env.KAGEWON_DEV === '1' ? env : {} });
 
 let control;
 try {
@@ -72,7 +74,7 @@ if (!AUTOSTART) {
     const port = manager.listenPort ?? config.port;
     try {
       // First, because the Mac must not keep pointing at a proxy that is about to close.
-      if (!config.killSwitch) await disableOurs(port);
+      if (!config.killSwitch) await disableOurs(port, dir);
     } finally {
       await manager.stop().catch(() => {});
       control.close();
@@ -80,7 +82,13 @@ if (!AUTOSTART) {
         // The Mac keeps pointing at this port, so another program must not be able to take it over. Hold it, and refuse
         // every connection, until the app starts again (it stops this helper and clears the settings).
         const holder = net.createServer(socket => socket.destroy());
-        holder.once('error', () => process.exit(0));
+        holder.once('error', async () => {
+          // Something else owns the port, so blocking is impossible, and leaving the Mac pointed at a stranger's
+          // listener would hand it every request. Put the settings back instead.
+          console.warn(`The kill switch could not hold port ${port}; switching the proxy settings off instead`);
+          await disableOurs(port, dir).catch(() => {});
+          process.exit(0);
+        });
         holder.listen(port, '127.0.0.1');
       } else {
         process.exit(0);

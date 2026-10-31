@@ -19,9 +19,10 @@
   },
   "scripts": {
     "start": "node proxy.mjs",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.mjs",
     "test:swift": "bash menubar/test.sh",
-    "test:live": "bash menubar/test-live.sh"
+    "test:live": "bash menubar/test-live.sh",
+    "hooks": "git config core.hooksPath scripts/hooks"
   },
   "dependencies": {
     "proxy-chain": "^3.0.1"

@@ -33,3 +33,13 @@ xcuserdata/
 .claude/
 .system-proxy.json
 .system-proxy.json.tmp
+
+# --- More things that must never be published, even though nothing here creates them today ---
+*~
+._*
+.npmrc
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*

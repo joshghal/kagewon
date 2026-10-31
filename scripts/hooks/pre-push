@@ -1,0 +1,10 @@
+#!/bin/sh
+remote="$1"
+zero="0000000000000000000000000000000000000000"
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  commits=$(git rev-list "$local_sha" --not --remotes="$remote")
+  [ -z "$commits" ] && continue
+  python3 "$(dirname "$0")/secret-guard.py" commits $commits || exit 1
+done
+exit 0
