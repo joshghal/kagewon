@@ -22,8 +22,8 @@ grep -qF "$LOG_LINE" Model.swift || { echo "Model.swift changed: update the log 
 python3 - "$LOG_LINE" > "$ROOT/Model.swift" <<'PY'
 import sys
 line = sys.argv[1]
-print(open('Model.swift').read().replace(line, 'URL(fileURLWithPath: ProcessInfo.processInfo.environment["HX_LOG"]!)'), end='')
+print(open('Model.swift').read().replace(line, 'URL(fileURLWithPath: ProcessInfo.processInfo.environment["KAGEWON_TEST_LOG"]!)'), end='')
 PY
 
 swiftc -O -swift-version 5 -o "$ROOT/live" "$ROOT/main.swift" "$ROOT/Model.swift" System.swift -framework AppKit -framework SwiftUI
-HX_LOG="$ROOT/app.log" "$ROOT/live" "$ROOT"
+KAGEWON_TEST_LOG="$ROOT/app.log" "$ROOT/live" "$ROOT"

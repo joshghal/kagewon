@@ -1,19 +1,24 @@
 #!/bin/bash
 # A stand-in for networksetup that keeps its state in files, so the tests never touch real network settings.
+# A test can make a command misbehave by creating a file in $FAKE_NS:
+#   fail.<verb>.<service>   the command prints "** Error: simulated failure" and exits with status 1
+#   hang.<verb>.<service>   the command never finishes (it sleeps for 30 seconds)
+# For -listallnetworkservices the service part is empty, so the file is named fail.-listallnetworkservices. (with the dot).
 S="$FAKE_NS"; svc="$2"
 get() { cat "$S/$1.$svc" 2>/dev/null || echo "$2"; }
+[ -e "$S/hang.$1.$svc" ] && exec sleep 30
+[ -e "$S/fail.$1.$svc" ] && { echo "** Error: simulated failure"; exit 1; }
 case "$1" in
  -listallnetworkservices) echo "An asterisk (*) denotes that a network service is disabled."; cat "$S/services";;
  -getwebproxy|-getsecurewebproxy) k=${1#-get}; echo "Enabled: $(get $k.en No)"; echo "Server: $(get $k.server '')"; echo "Port: $(get $k.port 0)"; echo "Authenticated Proxy Enabled: 0";;
- -setwebproxy|-setsecurewebproxy) [ -e "$S/fail.$1.$svc" ] && { echo "** Error: simulated failure"; exit 1; }
-   k=${1#-set}; echo Yes > "$S/$k.en.$svc"; echo "$3" > "$S/$k.server.$svc"; echo "$4" > "$S/$k.port.$svc";;
+ -setwebproxy|-setsecurewebproxy) k=${1#-set}; echo Yes > "$S/$k.en.$svc"; echo "$3" > "$S/$k.server.$svc"; echo "$4" > "$S/$k.port.$svc";;
  -setwebproxystate|-setsecurewebproxystate) k=${1#-set}; k=${k%state}; [ "$3" = on ] && v=Yes || v=No; echo $v > "$S/$k.en.$svc";;
  -getautoproxyurl) echo "URL: $(get pac.url '(null)')"; echo "Enabled: $(get pac.en No)";;
  -setautoproxyurl) echo "$3" > "$S/pac.url.$svc"; echo Yes > "$S/pac.en.$svc";;
  -setautoproxystate) [ "$3" = on ] && v=Yes || v=No; echo $v > "$S/pac.en.$svc";;
  -getproxyautodiscovery) echo "Auto Proxy Discovery: $(get disc Off)";;
  -setproxyautodiscovery) [ "$3" = on ] && v=On || v=Off; echo $v > "$S/disc.$svc";;
- -getproxybypassdomains) if [ -e "$S/bypass.$svc" ]; then cat "$S/bypass.$svc"; else echo "There aren't any bypass domains set on $svc."; fi;;
- -setproxybypassdomains) shift 2; printf '%s\n' "$@" > "$S/bypass.$svc";;
+ -getproxybypassdomains) if [ -s "$S/bypass.$svc" ]; then cat "$S/bypass.$svc"; else echo "There aren't any bypass domains set on $svc."; fi;;
+ -setproxybypassdomains) shift 2; if [ "$*" = "Empty" ]; then rm -f "$S/bypass.$svc"; else printf '%s\n' "$@" > "$S/bypass.$svc"; fi;;
  *) echo "unsupported $1"; exit 1;;
 esac

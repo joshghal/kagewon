@@ -8,11 +8,14 @@ NODE_BIN="$(command -v node || true)"
 [ -n "$NODE_BIN" ] || { echo "node not found in PATH" >&2; exit 1; }
 
 APP="$HOME/Applications/Kagewon.app"
-pkill -x Kagewon 2>/dev/null && sleep 1 || true # quit a running copy (it cleans up after itself)
+# Quit a running copy (it cleans up after itself) and wait, for up to about 10 seconds, until it is really gone.
+if pkill -x Kagewon 2>/dev/null; then
+  for _ in $(seq 1 100); do pgrep -x Kagewon >/dev/null || break; sleep 0.1; done
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/Kagewon" main.swift System.swift Model.swift Views.swift Glyph.swift -framework AppKit -framework SwiftUI
+swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" -o "$APP/Contents/MacOS/Kagewon" main.swift System.swift Model.swift Views.swift Glyph.swift -framework AppKit -framework SwiftUI
 
 PLIST="$APP/Contents/Info.plist"
 plutil -create xml1 "$PLIST"
@@ -27,6 +30,7 @@ add CFBundleShortVersionString string "0.1.0"
 add CFBundleVersion string "1"
 add LSMinimumSystemVersion string "14.0"
 add LSUIElement bool true
+add LSMultipleInstancesProhibited bool true
 add ProxyDir string "$PROJECT_DIR"
 add NodePath string "$NODE_BIN"
 

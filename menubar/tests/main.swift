@@ -16,6 +16,16 @@ func fresh() -> String {
 func put(_ name: String, _ svc: String, _ value: String) { try! (value + "\n").write(toFile: "\(work)/\(name).\(svc)", atomically: true, encoding: .utf8) }
 func val(_ name: String, _ svc: String) -> String { ((try? String(contentsOfFile: "\(work)/\(name).\(svc)", encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
 networksetup = CommandLine.arguments[1]
+func bypassList(_ svc: String) -> [String] {
+    ((try? String(contentsOfFile: "\(work)/bypass.\(svc)", encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+}
+func setBypass(_ svc: String, _ list: [String]) { try! (list.joined(separator: "\n") + "\n").write(toFile: "\(work)/bypass.\(svc)", atomically: true, encoding: .utf8) }
+/// Makes one fake command fail ("fail") or never finish ("hang") for one service; the service is empty for the list command.
+func misbehave(_ how: String, _ verb: String, _ svc: String = "") { fm.createFile(atPath: "\(work)/\(how).\(verb).\(svc)", contents: Data()) }
+func behaveAgain() { for n in (try? fm.contentsOfDirectory(atPath: work)) ?? [] where n.hasPrefix("fail.") || n.hasPrefix("hang.") { try? fm.removeItem(atPath: "\(work)/\(n)") } }
+func pacSetup() { put("pac.url", "Wi-Fi", "http://pac.example/proxy.pac"); put("pac.en", "Wi-Fi", "Yes"); put("disc", "Wi-Fi", "On") }
+func pacRestored() -> Bool { val("pac.url", "Wi-Fi") == "http://pac.example/proxy.pac" && val("pac.en", "Wi-Fi") == "Yes" && val("disc", "Wi-Fi") == "On" }
+func manualOff() { for svc in ["Wi-Fi", "Ethernet"] { put("webproxy.en", svc, "No"); put("securewebproxy.en", svc, "No") } }
 
 print("Reading answers exactly")
 let a30000 = "Enabled: Yes\nServer: 127.0.0.1\nPort: 30000\nAuthenticated Proxy Enabled: 0"
@@ -80,6 +90,7 @@ check(r.error != nil && r.applied.isEmpty, "the error is reported: \(r.error ?? 
 check(val("webproxy.en", "Wi-Fi") == "No" && val("securewebproxy.en", "Wi-Fi") == "No" && val("webproxy.en", "Ethernet") == "No", "no network is left pointed at us")
 check(val("pac.en", "Wi-Fi") == "Yes" && val("disc", "Wi-Fi") == "On", "the PAC file and discovery of Wi-Fi are back")
 check(!fm.fileExists(atPath: rec), "the record is removed")
+check(bypassList("Ethernet") == ["keep.me"] && bypassList("Wi-Fi").isEmpty, "the bypass lists are back as they were, with the user's own entry kept")
 
 print("Proxies that are not ours are left alone")
 rec = fresh()
@@ -94,6 +105,151 @@ sp = SystemProxy(port: 59999, recordPath: rec)
 DispatchQueue.concurrentPerform(iterations: 12) { i in if i % 2 == 0 { _ = sp.enable() } else { sp.disable() } }
 sp.disable()
 check(!sp.pointsAtUs && !fm.fileExists(atPath: rec), "after 12 racing calls and a final disable, nothing is left on")
+
+print("Putting things back even when the manual proxy is already off")
+rec = fresh(); pacSetup(); setBypass("Ethernet", ["keep.me"])
+_ = SystemProxy(port: 59999, recordPath: rec).enable()
+manualOff() // after a force quit the helper's watchdog switched the manual proxy off, but it never restored the automatic settings
+let afterCrash = SystemProxy(port: 8888, recordPath: rec)
+check(afterCrash.disable(), "the next launch can confirm that everything is back")
+check(pacRestored(), "the PAC file and discovery are restored although nothing pointed at us")
+check(bypassList("Ethernet") == ["keep.me"] && bypassList("Wi-Fi").isEmpty, "the bypass entries Kagewon added are gone, the user's own stay")
+check(!fm.fileExists(atPath: rec), "the record is removed")
+
+rec = fresh(); pacSetup()
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+manualOff() // something else (a VPN client, System Settings) switched our proxy off before the user turned Kagewon off
+check(sp.disable() && pacRestored(), "turning off after something else switched the proxy off still restores the PAC file")
+
+rec = fresh(); pacSetup()
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+put("pac.url", "Wi-Fi", "http://other.example/x.pac"); put("pac.en", "Wi-Fi", "Yes"); put("disc", "Ethernet", "On") // changed by someone else meanwhile
+check(sp.disable(), "turning off works")
+check(val("pac.url", "Wi-Fi") == "http://other.example/x.pac" && val("pac.en", "Wi-Fi") == "Yes" && val("disc", "Ethernet") == "On", "a change made by someone else is not overwritten with the old settings")
+
+print("The bypass list")
+rec = fresh(); setBypass("Wi-Fi", ["localhost", "keep.me"])
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+let withBypass = bypassList("Wi-Fi")
+check(SystemProxy.defaultBypass.allSatisfy(withBypass.contains) && withBypass.contains("keep.me"), "every wanted entry is there, and the user's own entry is kept")
+check(withBypass.filter { $0 == "localhost" }.count == 1, "an entry that was already there is not added twice")
+sp.disable()
+check(bypassList("Wi-Fi") == ["localhost", "keep.me"], "turning off leaves exactly what the user had")
+check(bypassList("Ethernet").isEmpty, "a list that was empty is empty again")
+rec = fresh()
+sp = SystemProxy(port: 59999, recordPath: rec, bypass: ["only.this"])
+_ = sp.enable()
+check(bypassList("Wi-Fi") == ["only.this"], "the list the helper reports is the one that is applied")
+sp.disable()
+
+print("The record on disk")
+rec = fresh(); pacSetup()
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+if let data = fm.contents(atPath: rec), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+   let services = obj["services"] as? [String: [String: Any]], let wifi = services["Wi-Fi"], let eth = services["Ethernet"] {
+    check(obj["port"] as? Int == 59999 && wifi["pacURL"] as? String == "http://pac.example/proxy.pac" && wifi["pacEnabled"] as? Bool == true
+          && wifi["discovery"] as? Bool == true && (wifi["addedBypass"] as? [String])?.count == SystemProxy.defaultBypass.count, "the record has the documented shape")
+    check(eth["pacURL"] == nil && eth["addedBypass"] != nil, "a missing PAC address is left out of the record")
+} else { check(false, "the record could not be read as JSON") }
+sp.disable()
+rec = fresh()
+try! #"{"port":59999,"services":{"Wi-Fi":{"pacURL":"http://pac.example/proxy.pac","pacEnabled":true,"discovery":true}}}"#.write(toFile: rec, atomically: true, encoding: .utf8)
+put("webproxy.en", "Wi-Fi", "Yes"); put("webproxy.server", "Wi-Fi", "127.0.0.1"); put("webproxy.port", "Wi-Fi", "59999")
+check(SystemProxy(port: 8888, recordPath: rec).disable() && pacRestored(), "a record from an older version (no addedBypass) is still understood")
+rec = fresh()
+try! #"{"port":59999,"services":{"Wi-Fi":{"pacURL":"javascript:alert(1)","pacEnabled":true,"discovery":false}}}"#.write(toFile: rec, atomically: true, encoding: .utf8)
+check(SystemProxy(port: 8888, recordPath: rec).disable(), "a record with an odd PAC address can be cleared")
+check(val("pac.url", "Wi-Fi") == "" && val("pac.en", "Wi-Fi") != "Yes", "and an address that is not http, https, ftp or file is never put back")
+check(isSafePACURL("https://pac.example/p.pac") && isSafePACURL("file:///etc/proxy.pac") && !isSafePACURL("javascript:alert(1)") && !isSafePACURL("not a url"), "only ordinary PAC addresses are accepted")
+
+print("A failed read is unknown, never off")
+rec = fresh(); setBypass("Wi-Fi", ["keep.me"])
+misbehave("fail", "-getproxybypassdomains", "Wi-Fi")
+r = SystemProxy(port: 59999, recordPath: rec).enable()
+check(r.error != nil && r.applied.isEmpty, "turning on is refused when a bypass list cannot be read: \(r.error ?? "-")")
+check(val("webproxy.en", "Wi-Fi") == "" && val("webproxy.en", "Ethernet") == "" && !fm.fileExists(atPath: rec), "nothing was changed and no record was written")
+check(bypassList("Wi-Fi") == ["keep.me"], "the user's bypass list was not overwritten with an error text")
+behaveAgain()
+misbehave("fail", "-getautoproxyurl", "Ethernet")
+r = SystemProxy(port: 59999, recordPath: rec).enable()
+check(r.error != nil && val("webproxy.en", "Wi-Fi") == "", "turning on is refused when the automatic settings cannot be read")
+behaveAgain()
+misbehave("fail", "-listallnetworkservices")
+r = SystemProxy(port: 59999, recordPath: rec).enable()
+check(r.error != nil && val("webproxy.en", "Wi-Fi") == "", "turning on is refused when the list of networks cannot be read")
+behaveAgain()
+rec = fresh(); pacSetup()
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+misbehave("fail", "-listallnetworkservices")
+check(!sp.disable() && fm.fileExists(atPath: rec), "turning off says it failed, and keeps the record, when the networks cannot be listed")
+behaveAgain()
+misbehave("fail", "-getwebproxy", "Wi-Fi")
+check(!sp.disable() && fm.fileExists(atPath: rec), "turning off says it failed, and keeps the record, when one proxy cannot be read")
+behaveAgain()
+check(sp.disable() && pacRestored() && !fm.fileExists(atPath: rec), "and the next try finishes the job")
+rec = fresh()
+sp = SystemProxy(port: 59999, recordPath: rec)
+_ = sp.enable()
+misbehave("fail", "-setwebproxystate", "Wi-Fi")
+check(!sp.disable() && fm.fileExists(atPath: rec), "turning off says it failed when a setting cannot be written")
+behaveAgain()
+sp.disable()
+
+print("No change without a recovery record")
+_ = fresh()
+r = SystemProxy(port: 59999, recordPath: "/nonexistent-kagewon-folder/record.json").enable()
+check(r.error != nil && r.error!.contains("recovery file"), "turning on is refused when the record cannot be written: \(r.error ?? "-")")
+check(val("webproxy.en", "Wi-Fi") == "" && val("securewebproxy.en", "Ethernet") == "", "and no setting was touched")
+rec = fresh()
+_ = SystemProxy(port: 59999, recordPath: rec).enable()
+check(!fm.fileExists(atPath: rec + ".tmp"), "no temporary file is left next to the record")
+SystemProxy(port: 59999, recordPath: rec).disable()
+let privateFile = work + "/private.txt"
+check(createPrivateFile(atPath: privateFile, contents: Data("x".utf8)) && ((try? fm.attributesOfItem(atPath: privateFile))?[.posixPermissions] as? NSNumber)?.intValue == 0o600, "a private file is created with mode 600 in one step")
+check(!createPrivateFile(atPath: privateFile), "and an existing file is never reused")
+let logFile = work + "/app.log"
+check(appendPrivate(Data("a".utf8), toPath: logFile) && appendPrivate(Data("b".utf8), toPath: logFile)
+      && ((try? fm.attributesOfItem(atPath: logFile))?[.posixPermissions] as? NSNumber)?.intValue == 0o600
+      && (try? String(contentsOfFile: logFile, encoding: .utf8)) == "ab", "a log file is created with mode 600 and appended to")
+let cappedLog = work + "/capped.log"
+let chunk = Data(String(repeating: "x", count: 99) .appending("\n").utf8)
+for _ in 0..<60 { appendPrivate(chunk, toPath: cappedLog, maxBytes: 1000) }
+let cappedSize = ((try? fm.attributesOfItem(atPath: cappedLog))?[.size] as? NSNumber)?.intValue ?? -1
+let cappedText = (try? String(contentsOfFile: cappedLog, encoding: .utf8)) ?? ""
+check(cappedSize > 0 && cappedSize <= 1000 + 100, "a log that reaches its limit is emptied instead of growing (size \(cappedSize))")
+check(cappedText.contains("was removed because it reached") && cappedText.hasSuffix(String(repeating: "x", count: 99) + "\n"), "it starts again with a note, and the newest lines are kept")
+check(((try? fm.attributesOfItem(atPath: cappedLog))?[.posixPermissions] as? NSNumber)?.intValue == 0o600, "and stays private")
+
+print("A stuck command cannot freeze the app")
+_ = fresh()
+check(shell("/bin/echo", ["hi"]).output == "hi", "a normal command returns its output")
+misbehave("hang", "-getwebproxy", "Wi-Fi")
+let began = Date()
+let stuck = shell(networksetup, ["-getwebproxy", "Wi-Fi"], timeout: 1)
+let waited = Date().timeIntervalSince(began)
+check(waited < 4 && stuck.status != 0 && stuck.output.contains("timed out"), String(format: "a command that never finishes is stopped and reported (%.1f s): %@", waited, stuck.output))
+behaveAgain()
+check(answerOK(status: 0, output: "Enabled: Yes") && !answerOK(status: 1, output: "") && !answerOK(status: 0, output: "** Error: The parameters were not valid.")
+      && !answerOK(status: 0, output: "Foo is not a recognized network service.") && answerOK(status: 0, output: ""), "an answer is only trusted when it exited normally and printed no error line")
+
+print("Showing the sticky time")
+let shown: [(Int, String)] = [(30, "30 s"), (60, "1 min"), (90, "1 min 30 s"), (600, "10 min"), (3600, "60 min"), (3630, "60 min 30 s"), (14400, "240 min")]
+for (seconds, text) in shown { check(formatDuration(seconds: seconds) == text, "\(seconds) seconds is shown as \"\(text)\" (got \"\(formatDuration(seconds: seconds))\")") }
+
+print("Recognising the helper after a crash")
+let withDays: TimeInterval = 2 * 86400 + 3 * 3600 + 4 * 60 + 5
+let understood = parseElapsed("05:07") == 307 && parseElapsed(" 1:02:03 ") == 3723 && parseElapsed("2-03:04:05") == withDays
+check(understood, "the running time printed by ps is understood")
+let refused = [parseElapsed("garbage"), parseElapsed("12"), parseElapsed("-5:00"), parseElapsed("")].allSatisfy { $0 == nil }
+check(refused, "and anything else is refused, so an unclear answer never leads to killing a process")
+check(isOurHelper(exe: "/opt/homebrew/bin/node", command: "/opt/homebrew/bin/node /Users/me/kagewon/proxy.mjs", proxyDir: "/Users/me/kagewon"), "node running this folder's proxy.mjs is our helper")
+check(!isOurHelper(exe: "/usr/bin/vim", command: "vim /Users/me/kagewon/proxy.mjs", proxyDir: "/Users/me/kagewon"), "an editor that reused the pid is not")
+check(!isOurHelper(exe: "/opt/homebrew/bin/node", command: "/opt/homebrew/bin/node /Users/me/other/proxy.mjs", proxyDir: "/Users/me/kagewon"), "node running another folder's file is not")
 
 print("Holding the port")
 let holder = PortHolder()

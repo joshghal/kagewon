@@ -22,6 +22,16 @@ setenv("CONTROL_PORT", "18889", 1)
 networksetup = root + "/fakens"
 
 let PROXY_PORT = 18888
+
+/// The leak check looks at this Mac's real settings, so it can only be tested while they use no proxy (and not while a real
+/// Kagewon is on, for example).
+let realSettingsUseAProxy: Bool = {
+    let real = "/usr/sbin/networksetup"
+    let services = shell(real, ["-listallnetworkservices"]).output.split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") }
+    return services.contains { svc in
+        ["-getwebproxy", "-getsecurewebproxy", "-getautoproxyurl"].contains { shell(real, [$0, svc]).output.contains("Enabled: Yes") }
+    }
+}()
 func connectDropped(_ port: Int) -> Bool? {   // true: accepted then closed by the other side; false: refused; nil: other
     let s = socket(AF_INET, SOCK_STREAM, 0); defer { close(s) }
     var addr = sockaddr_in(); addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); addr.sin_family = sa_family_t(AF_INET)
@@ -55,14 +65,26 @@ func phaseName(_ p: Phase) -> String { if case .error(let m) = p { return "error
 
     print("2. turning on (Tor has to bootstrap, this can take a minute)")
     m.turnOn()
-    let on = await waitFor("on", 150) { if case .error = m.phase { return true }; return m.phase == .on }
-    check(on && m.phase == .on, "   phase is on (\(phaseName(m.phase)))")
+    var shown = Set<String>()   // what the header says while connecting
+    let end = Date().addingTimeInterval(150)
+    while Date() < end {
+        if m.phase == .starting { shown.insert(m.connectingText) }
+        if m.phase == .on { break }
+        if case .error = m.phase { break }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+    check(m.phase == .on, "   phase is on (\(phaseName(m.phase)))")
+    check(shown.contains("Loading proxy lists..."), "   the header tells what it is waiting for while connecting: \(shown.sorted())")
     check(val("webproxy.en", "Wi-Fi") == "Yes" && val("webproxy.port", "Wi-Fi") == "\(PROXY_PORT)" && val("securewebproxy.en", "Ethernet") == "Yes", "   both networks point at the proxy port")
     check(val("pac.en", "Wi-Fi") == "No" && val("disc", "Wi-Fi") == "Off", "   PAC and discovery are switched off while on")
     check(fm.fileExists(atPath: proj + "/.system-proxy.json"), "   the record for crash recovery exists")
     check(await waitFor("exit ip", 60) { m.exitIP != nil && m.exitIP != "unavailable" }, "   an exit IP is shown: \(m.exitIP ?? "none")")
-    check(await waitFor("leak warning", 60) { m.leakWarning != nil }, "   the leak check notices that the (fake) system settings do not carry the traffic")
-    print("     warning text: \(m.leakWarning?.prefix(60) ?? "none")...")
+    if realSettingsUseAProxy {
+        print("  skip   the leak check: this Mac's real proxy settings are on, so the system path is not direct")
+    } else {
+        check(await waitFor("leak warning", 60) { m.leakWarning != nil }, "   the leak check notices that the (fake) system settings do not carry the traffic")
+        print("     warning text: \(m.leakWarning?.prefix(60) ?? "none")...")
+    }
 
     print("3. kill switch")
     do { let _: Empty = try await m.api("PUT", "/api/settings", body: ["killSwitch": true]) } catch { check(false, "settings: \(error)") }

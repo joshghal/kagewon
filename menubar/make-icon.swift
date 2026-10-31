@@ -1,7 +1,7 @@
 import AppKit
 
 // Draws the Kagewon app icon at every size macOS needs. Usage: make-icon <output .iconset folder>
-// The mark is a globe (the circle, 원, and the network) with its vermilion shadow (影) falling behind it, on deep indigo.
+// The mark is a globe (the circle, 원, and the network) with its vermilion shadow (影) falling beside it, on deep indigo.
 // The same drawing, in the same proportions, is in docs/logo.svg.
 
 func render(_ px: Int) -> Data {
@@ -27,13 +27,17 @@ func render(_ px: Int) -> Data {
     }
     let cream = NSColor(srgbRed: 0.96, green: 0.93, blue: 0.86, alpha: 1)
 
-    // the shadow: a vermilion disc, falling down and to the right of the globe
+    // the shadow: a vermilion disc falling down and to the right, with a clear gap kept around the globe
+    let everything = NSBezierPath(rect: NSRect(x: 0, y: 0, width: s, height: s))
+    everything.append(circle(57.5, 57.5, 37))
+    everything.windingRule = .evenOdd
+    NSGraphicsContext.saveGraphicsState()
+    everything.addClip()
     NSColor(srgbRed: 0.93, green: 0.36, blue: 0.27, alpha: 1).setFill()
-    circle(70.5, 70.5, 33).fill()
+    circle(72, 72, 33).fill()
+    NSGraphicsContext.restoreGraphicsState()
 
-    // the globe: a dark sphere with a cream outline, one meridian, the equator, and two parallels
-    NSColor(srgbRed: 0.106, green: 0.129, blue: 0.314, alpha: 1).setFill()
-    circle(57.5, 57.5, 33).fill()
+    // the globe: a cream outline, one meridian, the equator, and two parallels
     cream.setStroke()
     func stroke(_ path: NSBezierPath) { path.lineWidth = 3.6 * k; path.lineCapStyle = .round; path.stroke() }
     stroke(circle(57.5, 57.5, 33))

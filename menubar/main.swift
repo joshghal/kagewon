@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let model = AppModel()
     var cancellables = Set<AnyCancellable>()
     var signalSources: [DispatchSourceSignal] = []
+    private var spinTimer: Timer?
+    private var spinStep = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Only one copy at a time, otherwise the second one would kill the first one's helper.
@@ -48,7 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        model.shutdown()
+        if !model.shutdown() {
+            // Quitting is the last chance to say it: after this nothing is left that could switch the settings off.
+            let alert = NSAlert()
+            alert.messageText = "Kagewon could not confirm that the proxy settings are off"
+            alert.informativeText = "If your internet does not work, open System Settings, Network, your connection, Details, Proxies and switch the proxies off, or use the recovery command in the README."
+            alert.runModal()
+        }
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -57,6 +65,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func updateIcon(_ phase: Phase) {
         guard let button = statusItem.button else { return }
+        spinTimer?.invalidate()
+        spinTimer = nil
+        switch phase {
+        case .launching, .starting:
+            // The dashes travel around the circle while connecting. Not with Reduce Motion, and not for longer than it takes.
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                spinStep = 0
+                let timer = Timer(timeInterval: 0.07, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.spinStep += 1
+                        self.statusItem.button?.image = menuBarGlyph(for: self.model.phase, spin: self.spinStep)
+                    }
+                }
+                RunLoop.main.add(timer, forMode: .common) // also while a menu is open
+                spinTimer = timer
+            }
+        default:
+            break
+        }
         button.image = menuBarGlyph(for: phase)
         button.image?.accessibilityDescription = "Kagewon"
         button.title = ""

@@ -55,7 +55,7 @@ func providerLine(_ p: ProviderInfo) -> (text: String, color: Color) {
     if let e = p.runtime.error { return (e, .red) }
     if p.runtime.status == "ok" {
         if p.type == "tor" { return (torDetail(p, running: true), .secondary) }
-        return ("\(p.runtime.healthy) of \(p.runtime.count) proxies healthy", p.runtime.healthy == 0 ? .orange : .secondary)
+        return ("\(p.runtime.healthy) of \(p.runtime.count) proxies reachable", p.runtime.healthy == 0 ? .orange : .secondary)
     }
     if p.type == "tor" { return (torDetail(p, running: false), .secondary) }
     let c = p.countries ?? []
@@ -96,7 +96,7 @@ struct HeaderView: View {
         switch model.phase {
         case .launching: return "Starting helper..."
         case .off: return "Off, traffic goes direct"
-        case .starting: return "Connecting..."
+        case .starting: return model.connectingText
         case .on:
             let active = (model.status?.providers ?? []).filter { $0.enabled && $0.runtime.status == "ok" }
             if !active.isEmpty && active.allSatisfy({ isGatewayType($0.type) }) {
@@ -229,7 +229,7 @@ struct HomeView: View {
                          busy: model.ipBusy)
                     Tile(title: allGateways ? "Source" : "Proxies",
                          value: !model.isOn ? "Off" : (allGateways ? "Rotating" : "\(healthy)/\(total)"),
-                         caption: !model.isOn ? "Not loaded" : (allGateways ? "gateway picks the IP" : "healthy"))
+                         caption: !model.isOn ? "Not loaded" : (allGateways ? "gateway picks the IP" : "reachable"))
                 }
 
                 Card {
@@ -248,14 +248,14 @@ struct HomeView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         if rotation == "sticky" {
-                            let minutes = model.status?.stickyMinutes ?? 10
+                            let seconds = model.stickySeconds
                             Divider().opacity(0.4)
                             // Each setting is a row: the label on the left, its control on the right.
                             HStack {
                                 Text("Keep each IP for").font(.system(size: 12))
                                 Spacer()
-                                Text("\(minutes) min").font(.system(size: 12, weight: .semibold)).monospacedDigit()
-                                Stepper("", value: Binding(get: { minutes }, set: { model.setStickyMinutes($0) }), in: 1...240)
+                                Text(formatDuration(seconds: seconds)).font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                                Stepper("", value: Binding(get: { seconds }, set: { model.setStickySeconds($0) }), in: 30...14400, step: 30)
                                     .labelsHidden()
                             }
                             VStack(alignment: .leading, spacing: 4) {
@@ -582,7 +582,7 @@ struct ActivityView: View {
                     .padding(8)
                 }
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
-                .onChange(of: model.logLines.count) { _ in
+                .onChange(of: model.logLines.count) {
                     if let last = model.logLines.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -733,7 +733,8 @@ struct SettingsView: View {
 
 // MARK: - Brand mark
 
-/// The Kagewon mark: a globe (the circle, 원, and the network) with its shadow (影) behind it. The shadow appears when the proxy is on.
+/// The Kagewon mark: a globe (the circle, 원, and the network) and its shadow (影). Off, only a thin arc of the shadow shows.
+/// On, the shadow is a solid crescent, with a clear gap kept around the globe.
 struct KagewonMark: View {
     var filled: Bool
     var color: Color = .white
@@ -741,19 +742,22 @@ struct KagewonMark: View {
     var body: some View {
         GeometryReader { g in
             let s = min(g.size.width, g.size.height)
-            let d = s * 0.66        // the globe's diameter
-            let fall = s * 0.16     // how far the shadow falls from the globe, on each axis
+            let d = s * 0.62        // the globe's diameter
+            let fall = s * 0.17     // how far the shadow falls from the globe, on each axis
             let line = s * 0.065
+            let gap = s * 0.06      // clear space between the globe and its shadow
             ZStack {
-                if filled {
-                    // the shadow, with the inside of the globe cut out of it so that only a crescent shows
-                    ZStack {
+                ZStack {
+                    if filled {
                         Circle().fill(color).frame(width: d, height: d).offset(x: fall / 2, y: fall / 2)
-                        Circle().fill(Color.black).frame(width: d, height: d).offset(x: -fall / 2, y: -fall / 2)
-                            .blendMode(.destinationOut)
+                    } else {
+                        Circle().stroke(color, lineWidth: line * 0.8).frame(width: d, height: d).offset(x: fall / 2, y: fall / 2)
                     }
-                    .compositingGroup()
+                    Circle().fill(Color.black).frame(width: d + line + gap * 2, height: d + line + gap * 2)
+                        .offset(x: -fall / 2, y: -fall / 2)
+                        .blendMode(.destinationOut)
                 }
+                .compositingGroup()
                 ZStack {
                     Circle().stroke(color, lineWidth: line).frame(width: d, height: d)
                     Ellipse().stroke(color, lineWidth: line * 0.85).frame(width: d * 0.41, height: d)

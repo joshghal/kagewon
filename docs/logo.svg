@@ -4,12 +4,15 @@
       <stop offset="0" stop-color="#2a3366"/>
       <stop offset="1" stop-color="#121738"/>
     </linearGradient>
+    <!-- everything outside a circle a little larger than the globe: the gap between the globe and its shadow -->
+    <clipPath id="outside">
+      <path clip-rule="evenodd" d="M 0 0 H 128 V 128 H 0 Z M 20.5 57.5 a 37 37 0 1 0 74 0 a 37 37 0 1 0 -74 0 Z"/>
+    </clipPath>
   </defs>
   <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#card)"/>
   <!-- the shadow of the globe, falling down and to the right -->
-  <circle cx="70.5" cy="70.5" r="33" fill="#ed5c45"/>
+  <circle cx="72" cy="72" r="33" fill="#ed5c45" clip-path="url(#outside)"/>
   <!-- the globe: a circle (won) that is also the network -->
-  <circle cx="57.5" cy="57.5" r="33" fill="#1b2150"/>
   <g fill="none" stroke="#f5eedc" stroke-width="3.6" stroke-linecap="round">
     <circle cx="57.5" cy="57.5" r="33"/>
     <ellipse cx="57.5" cy="57.5" rx="14" ry="33"/>

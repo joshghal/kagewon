@@ -1,47 +1,67 @@
 import AppKit
 
-/// The menu bar mark: a globe (the circle and the network). When the proxy is on, its shadow falls behind it as a crescent.
-/// A dashed circle means connecting, and a circle with "!" means an error. It is a template image, so macOS colours it.
+/// The menu bar mark: a globe (the circle and the network) and its shadow.
+/// Off, only a thin arc of the shadow shows. On, the shadow is a solid crescent. A dashed circle means connecting,
+/// and a circle with "!" means an error. It is a template image, so macOS colours it for the menu bar.
+/// `spin` moves the dashes along the circle one step, so that connecting looks busy instead of stuck.
 /// The shapes are drawn on an 18 point square with the y axis pointing down, the same way as docs/logo.svg.
-func menuBarGlyph(for phase: Phase) -> NSImage {
-    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
-        let cx: CGFloat = 7.6, cy: CGFloat = 7.6, r: CGFloat = 5.6
-        let globe = NSBezierPath(ovalIn: NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r))
+func menuBarGlyph(for phase: Phase, spin: Int = 0) -> NSImage {
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { bounds in
+        let cx: CGFloat = 7.7, cy: CGFloat = 7.7, r: CGFloat = 5.3
+        let fall: CGFloat = 3.2
+        func circle(_ x: CGFloat, _ y: CGFloat, _ radius: CGFloat) -> NSBezierPath {
+            NSBezierPath(ovalIn: NSRect(x: x - radius, y: y - radius, width: 2 * radius, height: 2 * radius))
+        }
         NSColor.black.set()
 
-        if case .on = phase {
-            // the shadow, with the inside of the globe cut out of it so that only a crescent shows
-            NSBezierPath(ovalIn: NSRect(x: 10.4 - r, y: 10.4 - r, width: 2 * r, height: 2 * r)).fill()
-            NSGraphicsContext.current?.compositingOperation = .clear
-            globe.fill()
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
+        switch phase {
+        case .off, .on:
+            // The shadow falls down and to the right. Everything inside a circle a little larger than the globe is left
+            // clear, so a gap separates the two and the shadow never looks attached to the globe's outline.
+            let outside = NSBezierPath(rect: bounds)
+            outside.append(circle(cx, cy, r + 1.55))
+            outside.windingRule = .evenOdd
+            NSGraphicsContext.saveGraphicsState()
+            outside.addClip()
+            let shadow = circle(cx + fall, cy + fall, r)
+            if case .on = phase {
+                shadow.fill()
+            } else {
+                shadow.lineWidth = 1.1
+                shadow.stroke()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        default:
+            break
         }
 
-        globe.lineWidth = 1.4
+        let globe = circle(cx, cy, r)
+        globe.lineWidth = 1.3
         switch phase {
-        case .launching, .starting: globe.setLineDash([2.2, 1.7], count: 2, phase: 0)
+        case .launching, .starting: globe.setLineDash([2.1, 1.6], count: 2, phase: CGFloat(spin))
         default: break
         }
         globe.stroke()
 
         switch phase {
         case .off, .on:
-            let meridian = NSBezierPath(ovalIn: NSRect(x: cx - 2.3, y: cy - r, width: 4.6, height: 2 * r))
-            meridian.lineWidth = 1.2
+            let meridian = NSBezierPath(ovalIn: NSRect(x: cx - 2.2, y: cy - r, width: 4.4, height: 2 * r))
+            meridian.lineWidth = 1.1
             meridian.stroke()
             let equator = NSBezierPath()
             equator.move(to: NSPoint(x: cx - r, y: cy))
             equator.line(to: NSPoint(x: cx + r, y: cy))
-            equator.lineWidth = 1.2
+            equator.lineWidth = 1.1
             equator.stroke()
         case .error:
-            NSBezierPath(roundedRect: NSRect(x: 6.9, y: 4.2, width: 1.4, height: 4.4), xRadius: 0.7, yRadius: 0.7).fill()
-            NSBezierPath(ovalIn: NSRect(x: 6.7, y: 9.7, width: 1.8, height: 1.8)).fill()
+            NSBezierPath(roundedRect: NSRect(x: cx - 0.7, y: cy - 3.5, width: 1.4, height: 4.2), xRadius: 0.7, yRadius: 0.7).fill()
+            circle(cx, cy + 3.0, 0.9).fill()
         case .launching, .starting:
             break
         }
         return true
     }
     image.isTemplate = true
+    image.accessibilityDescription = "Kagewon"
     return image
 }
