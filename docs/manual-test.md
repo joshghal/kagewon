@@ -23,7 +23,7 @@ Also look up your real IP address with the proxy off (for example in a browser),
 |---|---|---|
 | 1. Start | Open the app. | A globe with a thin arc of shadow beside it appears in the menu bar, the Providers tab lists your providers, and there is no error. |
 | 2. Turn on | Press the power switch. | While connecting, dashes travel around a circle and the line under the app name names each step. Then the globe has a solid crescent beside it. The Exit IP tile shows an address that is not your real one. The card "Your real IP may be exposed" does not appear. |
-| 3. Settings | Run the commands above again. | Both the web proxy and the secure web proxy are on for `127.0.0.1` and your port. A PAC file and discovery are off. The bypass list has your own entries plus the local addresses listed in the README. |
+| 3. Settings | Run the commands above again. | Both the web proxy and the secure web proxy are on for `127.0.0.1` and your port. A PAC file and discovery are off. The bypass list has your own entries plus the local addresses listed in [security.md](security.md#what-the-proxy-covers). |
 | 4. Rotation | Use Sticky, then Random, and reload a site. | Sticky keeps one address for the site. Random changes it. |
 | 5. Local addresses | Open your router page (for example `http://192.168.1.1/`) in a browser. | It does not go through the proxy, and the Activity tab does not list it. |
 | 6. Tampering | With the proxy on, switch the Wi-Fi proxy off in System Settings. | Within about 15 seconds the app shows that the settings were changed by something else. |
@@ -35,5 +35,5 @@ Also look up your real IP address with the proxy off (for example in a browser),
 | 12. Sleep | Turn on, close the lid or choose Sleep, then wake the Mac. | Within a few seconds the proxy settings are still on and no warning appears. |
 | 13. Another network | Turn on, then connect to a different Wi-Fi network or plug in Ethernet. | The new network is covered within moments. Turn off and check that its settings are back as they were. |
 
-If any step fails, restore your network with the command in the README (Known limitations) and open an issue or a private report
+If any step fails, restore your network with the command in the [README](../README.md#if-your-internet-stops) and open an issue or a private report
 (see [SECURITY.md](../SECURITY.md)) with the step number.

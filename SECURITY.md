@@ -36,7 +36,7 @@ In scope:
 - Starting, stopping, and cleaning up the helper process and Tor
 - The build script
 
-Out of scope (these are documented in the README, under Safety guidance):
+Out of scope (these are documented in [docs/security.md](docs/security.md), under Safety guidance):
 
 - What a proxy provider or a Tor exit relay can see of your traffic
 - Applications that ignore the Mac's proxy settings
