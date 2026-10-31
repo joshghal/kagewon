@@ -175,7 +175,15 @@ export function killAllTorNow() {
  * Stops Tor processes left over by a helper that was force-killed. Each one is found by the pid file we wrote,
  * and only killed if that pid is still a tor started from our own torrc (pids get reused).
  */
-export function cleanupStaleTor(dir) {
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const isAlive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/**
+ * Stops a Tor that a crashed helper left behind. It waits until that process is really gone (and forces it after a grace
+ * period), because a new Tor that starts while the old one still holds the data folder and the port fails to start.
+ * This runs before the control interface handles any request, so nothing can start Tor in the meantime.
+ */
+export function cleanupStaleTor(dir, graceMs = 3000) {
   const root = path.join(dir, '.tor');
   let names;
   try { names = fs.readdirSync(root); } catch { return; }
@@ -185,7 +193,14 @@ export function cleanupStaleTor(dir) {
     try { pid = Number(fs.readFileSync(pidFile, 'utf8')); } catch { continue; }
     try {
       const cmd = execFileSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 3000, env: {} });
-      if (Number.isInteger(pid) && pid > 1 && /(^|\/)tor\s/.test(cmd) && cmd.includes(path.join(root, name, 'torrc'))) process.kill(pid, 'SIGTERM');
+      if (Number.isInteger(pid) && pid > 1 && /(^|\/)tor\s/.test(cmd) && cmd.includes(path.join(root, name, 'torrc'))) {
+        process.kill(pid, 'SIGTERM');
+        for (let waited = 0; waited < graceMs && isAlive(pid); waited += 50) sleepSync(50);
+        if (isAlive(pid)) {
+          process.kill(pid, 'SIGKILL');
+          for (let waited = 0; waited < 1000 && isAlive(pid); waited += 50) sleepSync(50);
+        }
+      }
     } catch {}
     try { fs.rmSync(pidFile, { force: true }); } catch {}
   }
