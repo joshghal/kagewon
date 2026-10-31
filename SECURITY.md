@@ -5,7 +5,7 @@
 Please report security problems privately. Do not open a public issue that describes them.
 
 Preferred: use GitHub's private vulnerability reporting. Open the **Security** tab of the repository and choose **Report a
-vulnerability**. If that button is not shown, the maintainer has not enabled it yet.
+vulnerability**.
 
 If you cannot use it, open a public issue titled "Security contact request" that says nothing about the problem itself. The
 maintainer will arrange a private channel.
