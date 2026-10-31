@@ -23,7 +23,7 @@ add CFBundleIdentifier string "app.kagewon.menubar"
 add CFBundleExecutable string "Kagewon"
 add CFBundleIconFile string "AppIcon"
 add CFBundlePackageType string "APPL"
-add CFBundleShortVersionString string "1.0"
+add CFBundleShortVersionString string "0.1.0"
 add CFBundleVersion string "1"
 add LSMinimumSystemVersion string "14.0"
 add LSUIElement bool true

@@ -1,14 +1,14 @@
 {
   "name": "kagewon",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Kagewon: a menu bar app for macOS that rotates your IP address (Webshare and Tor)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kagewon-app/kagewon.git"
+    "url": "git+https://github.com/joshghal/kagewon.git"
   },
-  "homepage": "https://github.com/kagewon-app/kagewon#readme",
+  "homepage": "https://github.com/joshghal/kagewon#readme",
   "bugs": {
-    "url": "https://github.com/kagewon-app/kagewon/issues"
+    "url": "https://github.com/joshghal/kagewon/issues"
   },
   "license": "MIT",
   "author": "",
@@ -20,7 +20,8 @@
   "scripts": {
     "start": "node proxy.mjs",
     "test": "node --test test/",
-    "test:swift": "bash menubar/test.sh"
+    "test:swift": "bash menubar/test.sh",
+    "test:live": "bash menubar/test-live.sh"
   },
   "dependencies": {
     "proxy-chain": "^3.0.1"

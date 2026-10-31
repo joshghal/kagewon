@@ -8,6 +8,9 @@ Kagewon is a macOS menu bar application that routes your traffic through rotatin
 switches the Mac's proxy settings on and off for you. It supports two providers: Webshare (paid proxy lists) and Tor (free).
 HTTP and HTTPS are both supported. HTTPS traffic is tunneled and is not decrypted.
 
+> **Status: beta (0.1.0).** It changes your Mac's network settings, so read [Safety guidance](#safety-guidance) first and run the
+> checks in [docs/manual-test.md](docs/manual-test.md) before you rely on it.
+
 ## Contents
 
 - [About the name](#about-the-name)
@@ -38,7 +41,7 @@ the idea: a ring with a shadow inside it. The same two ideas exist as characters
 Build the application from source on your own Mac. The resulting app is not notarized, so do not distribute it.
 
 ```bash
-git clone https://github.com/kagewon-app/kagewon.git
+git clone https://github.com/joshghal/kagewon.git
 cd kagewon
 npm install
 menubar/build.sh
@@ -87,6 +90,8 @@ that drops every connection, so no other program on the Mac can take it over. En
 prefer losing the connection to exposing your real IP address. Press Try Again or quit the app to restore the connection.
 
 ## Security model
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### What the proxy covers
 
@@ -204,6 +209,7 @@ Kagewon never decrypts HTTPS and sends no usage data to anyone. The services it 
 npm install
 npm test             # helper tests
 npm run test:swift   # system proxy tests, run against a stand-in for networksetup (no real setting is changed)
+npm run test:live    # turn on, kill switch, turn off and quit with a real Tor; needs Tor and a few minutes, changes no real setting
 node proxy.mjs       # run the helper on its own; the app normally starts it
 ```
 
@@ -212,7 +218,7 @@ node proxy.mjs       # run the helper on its own; the app normally starts it
 | `proxy.mjs` | Helper entry point |
 | `src/` | Helper modules: proxy engine, providers, Tor management, configuration, control interface |
 | `menubar/` | The macOS app (Swift), its build script, and its tests |
-| `docs/` | Additional documentation and the logo |
+| `docs/` | Additional documentation, the manual release checks, and the logo |
 | `test/` | Automated tests |
 
 Settings and providers are stored in `config.json` in the project folder. The environment variables `CONTROL_PORT`,
