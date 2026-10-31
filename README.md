@@ -161,7 +161,10 @@ for tests. They are not needed for normal use.
 
 ## License
 
-This repository does not yet include a license file. Until one is added, all rights are reserved by the author.
+Kagewon is released under the [MIT License](LICENSE).
+
+It depends on [proxy-chain](https://github.com/apify/proxy-chain), which is distributed under its own license, and it can
+use Tor, which you install separately.
 
 ## Disclaimer
 

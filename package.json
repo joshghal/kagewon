@@ -10,7 +10,7 @@
   "bugs": {
     "url": "https://github.com/kagewon-app/kagewon/issues"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "author": "",
   "private": true,
   "type": "module",
