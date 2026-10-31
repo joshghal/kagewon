@@ -12,7 +12,7 @@ pkill -x Kagewon 2>/dev/null && sleep 1 || true # quit a running copy (it cleans
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/Kagewon" main.swift System.swift Model.swift Views.swift -framework AppKit -framework SwiftUI
+swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/Kagewon" main.swift System.swift Model.swift Views.swift Glyph.swift -framework AppKit -framework SwiftUI
 
 PLIST="$APP/Contents/Info.plist"
 plutil -create xml1 "$PLIST"

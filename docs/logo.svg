@@ -6,6 +6,13 @@
     </linearGradient>
   </defs>
   <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#card)"/>
-  <path d="M 79.96 33.98 A 34 34 0 1 0 95.06 50.17" fill="none" stroke="#f5eedc" stroke-width="6.4" stroke-linecap="round"/>
-  <circle cx="69.8" cy="70.4" r="13.4" fill="#ed5c45"/>
+  <!-- the shadow of the globe, falling down and to the right -->
+  <circle cx="70.5" cy="70.5" r="33" fill="#ed5c45"/>
+  <!-- the globe: a circle (won) that is also the network -->
+  <circle cx="57.5" cy="57.5" r="33" fill="#1b2150"/>
+  <g fill="none" stroke="#f5eedc" stroke-width="3.6" stroke-linecap="round">
+    <circle cx="57.5" cy="57.5" r="33"/>
+    <ellipse cx="57.5" cy="57.5" rx="14" ry="33"/>
+    <path d="M 24.5 57.5 H 90.5 M 31.5 39.5 H 83.5 M 31.5 75.5 H 83.5"/>
+  </g>
 </svg>

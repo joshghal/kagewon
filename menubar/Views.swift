@@ -733,7 +733,7 @@ struct SettingsView: View {
 
 // MARK: - Brand mark
 
-/// The Kagewon mark: a ring (the circle, 원) with a disc offset inside it (the shadow, 影). The disc appears when the proxy is on.
+/// The Kagewon mark: a globe (the circle, 원, and the network) with its shadow (影) behind it. The shadow appears when the proxy is on.
 struct KagewonMark: View {
     var filled: Bool
     var color: Color = .white
@@ -741,16 +741,25 @@ struct KagewonMark: View {
     var body: some View {
         GeometryReader { g in
             let s = min(g.size.width, g.size.height)
+            let d = s * 0.66        // the globe's diameter
+            let fall = s * 0.16     // how far the shadow falls from the globe, on each axis
+            let line = s * 0.065
             ZStack {
-                Circle()
-                    .stroke(color, style: StrokeStyle(lineWidth: s * 0.1, lineCap: .round))
-                    .frame(width: s * 0.74, height: s * 0.74)
                 if filled {
-                    Circle()
-                        .fill(color)
-                        .frame(width: s * 0.38, height: s * 0.38)
-                        .offset(x: s * 0.07, y: s * 0.08)
+                    // the shadow, with the inside of the globe cut out of it so that only a crescent shows
+                    ZStack {
+                        Circle().fill(color).frame(width: d, height: d).offset(x: fall / 2, y: fall / 2)
+                        Circle().fill(Color.black).frame(width: d, height: d).offset(x: -fall / 2, y: -fall / 2)
+                            .blendMode(.destinationOut)
+                    }
+                    .compositingGroup()
                 }
+                ZStack {
+                    Circle().stroke(color, lineWidth: line).frame(width: d, height: d)
+                    Ellipse().stroke(color, lineWidth: line * 0.85).frame(width: d * 0.41, height: d)
+                    Capsule().fill(color).frame(width: d, height: line * 0.85)
+                }
+                .offset(x: -fall / 2, y: -fall / 2)
             }
             .frame(width: s, height: s)
         }

@@ -51,38 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.shutdown()
     }
 
-    /// The menu bar mark: a ring, plus a disc inside it when on, a dashed ring while connecting, and a "!" on error.
-    func glyph(for phase: Phase) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-            NSColor.black.set()
-            let ring = NSBezierPath(ovalIn: NSRect(x: 2.25, y: 2.25, width: 13.5, height: 13.5))
-            ring.lineWidth = 1.7
-            switch phase {
-            case .starting, .launching: ring.setLineDash([2.2, 2.2], count: 2, phase: 0)
-            default: break
-            }
-            ring.stroke()
-            switch phase {
-            case .on:
-                NSBezierPath(ovalIn: NSRect(x: 6.3, y: 4.3, width: 7, height: 7)).fill()
-            case .error:
-                NSBezierPath(rect: NSRect(x: 8.2, y: 6.6, width: 1.6, height: 5.2)).fill()
-                NSBezierPath(ovalIn: NSRect(x: 8.0, y: 4.2, width: 2.0, height: 2.0)).fill()
-            default: break
-            }
-            return true
-        }
-        image.isTemplate = true
-        return image
-    }
-
     func popoverDidClose(_ notification: Notification) {
         model.popoverOpen = false
     }
 
     func updateIcon(_ phase: Phase) {
         guard let button = statusItem.button else { return }
-        button.image = glyph(for: phase)
+        button.image = menuBarGlyph(for: phase)
         button.image?.accessibilityDescription = "Kagewon"
         button.title = ""
     }

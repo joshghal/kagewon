@@ -27,7 +27,7 @@ HTTP and HTTPS are both supported. HTTPS traffic is tunneled and is not decrypte
 ## About the name
 
 Kagewon combines two words: **kage** (影, Japanese for "shadow") and **won** (원, Korean for "circle"). The logo shows
-the idea: a ring with a shadow inside it. The same two ideas exist as characters in Chinese (影, *yǐng*, and 圆, *yuán*).
+the idea: a globe, which is also a circle, with its shadow falling behind it. The same two ideas exist as characters in Chinese (影, *yǐng*, and 圆, *yuán*).
 
 ## Requirements
 
