@@ -5,6 +5,7 @@
 #   hang.<verb>.<service>   the command never finishes (it sleeps for 30 seconds)
 # For -listallnetworkservices the service part is empty, so the file is named fail.-listallnetworkservices. (with the dot).
 S="$FAKE_NS"; svc="$2"
+[ -n "$FAKE_NS_DELAY" ] && sleep "$FAKE_NS_DELAY" # only the recorded demonstration sets this
 get() { cat "$S/$1.$svc" 2>/dev/null || echo "$2"; }
 [ -e "$S/hang.$1.$svc" ] && exec sleep 30
 [ -e "$S/fail.$1.$svc" ] && { echo "** Error: simulated failure"; exit 1; }
