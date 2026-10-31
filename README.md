@@ -43,13 +43,17 @@ Build the application from source on your own Mac. The resulting app is not nota
 ```bash
 git clone https://github.com/joshghal/kagewon.git
 cd kagewon
-npm install
+npm ci
 menubar/build.sh
 open ~/Applications/Kagewon.app
 ```
 
-`build.sh` compiles the app, draws its icon, and installs `Kagewon.app` into `~/Applications`. If you move the project
-folder later, run `menubar/build.sh` again, because the app remembers the folder it was built from.
+`build.sh` compiles the app, draws its icon, and installs `Kagewon.app` into `~/Applications`. If a copy is running, `build.sh`
+quits it first, which switches the proxy off. If you move the project folder later, run `menubar/build.sh` again, because the
+app remembers the folder it was built from.
+
+Clone into a folder that is not synced by iCloud Drive or a similar service. The project folder holds `config.json`, which
+contains your API key, and the Tor data folder.
 
 ## Usage
 
@@ -76,7 +80,8 @@ When several providers are enabled, the **Traffic share** value of each one cont
 
 ### Rotation
 
-- **Sticky** keeps one IP address per website for a set time, so sessions and logins keep working. When the time is up,
+- **Sticky** keeps one IP address per website for a set time, so sessions and logins keep working. You choose the time on the
+  dashboard, from 30 seconds to 4 hours in steps of 30 seconds (the default is 10 minutes). When the time is up,
   the address changes on its own, even if an application keeps its connection open. A switch controls this behavior,
   because closing connections interrupts downloads in progress.
 - **Random** uses a new IP address for every connection. Logins may break.
@@ -89,41 +94,64 @@ Mac's proxy settings cannot connect until the proxy is running again. The app al
 that drops every connection, so no other program on the Mac can take it over. Enable the kill switch in Settings if you
 prefer losing the connection to exposing your real IP address. Press Try Again or quit the app to restore the connection.
 
+If another program already owns the proxy port, blocking is impossible, because that program would receive your traffic. The
+kill switch then says so, and when the app itself is force-quit the helper switches the settings off instead of leaving them
+pointed at a stranger's listener.
+
 ## Security model
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### What the proxy covers
 
-- It covers every active network (Wi-Fi, Ethernet, a hotspot), including one that appears while it is on. The app warns you
-  if another program changes those settings.
+- It covers every enabled network service (Wi-Fi, Ethernet, a hotspot). A service that appears while it is on is covered at
+  once, and the settings are checked again after the Mac wakes from sleep or the network changes. The app warns you if another
+  program changes those settings.
 - While it is on, the automatic proxy settings of those networks (a PAC file and automatic proxy discovery) are switched off,
-  because they can send traffic around a manual proxy. They are put back exactly as they were when you turn the proxy off.
-  What was changed is written to `.system-proxy.json` first, so the next start of the app can undo it after a crash.
+  because they can send traffic around a manual proxy. They are put back as they were when you turn the proxy off, unless
+  something else changed them in the meantime, and the bypass entries that Kagewon added are removed again. What was changed
+  is written to `.system-proxy.json` first, so the next start of the app, or the helper itself after a force-quit, can undo
+  it. If that record cannot be written, the proxy does not turn on.
 - When you turn the proxy on, the app checks that it works: it looks up your real IP address directly, then looks it up the
   way an application would. If the two match, a warning says that your real address is still reaching the internet, for
-  example because a VPN client routes around the proxy.
+  example because a VPN client routes around the proxy. After a wake from sleep or a network change the check is repeated
+  against the remembered address, without another direct request.
+- Made-up host names cannot disturb a real session. A web page can make your browser ask for host names that do not exist, and
+  the provider refuses those. Only a host name that has worked before can change the pinned IP of its site or count against
+  a proxy; a name that never worked only gets a short detour of its own.
 - It covers only applications that follow the Mac's proxy settings. Command-line tools (use `curl -x http://127.0.0.1:8888`),
   some applications, system services, UDP traffic, and WebRTC can bypass it.
-- Addresses on this Mac and on the local network are never sent to a provider: `localhost`, `10.x.x.x`, `172.16.x.x` to
-  `172.31.x.x`, `192.168.x.x`, `100.64.x.x`, and names ending in `.local`, `.lan`, or `.internal`. They are added to the proxy
-  bypass list, and the helper also refuses them with a 403 response if something sends them anyway, including unusual
-  spellings such as `127.1`. Single-word names such as `http://nas/` are refused as well; use the IP address instead.
+- Addresses on this Mac and on the local network are never sent to a provider. The app puts these on the proxy bypass list, so
+  that local devices keep working directly: `localhost`, `127.0.0.0/8`, `0.0.0.0/8`, `169.254.0.0/16`, `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `224.0.0.0/4`, `240.0.0.0/4`, `255.255.255.255`, and names ending in
+  `.local`, `.localhost`, `.lan`, `.internal`, `.home.arpa`, `.localdomain`, `.home`, `.corp`, `.box`, `.intranet`,
+  `.private`, `.test`, or `.invalid`. The helper also refuses them with a 403 response if something sends them anyway,
+  including unusual spellings such as `127.1`, number-like hosts that are not plain dotted decimal (`010.0.0.1`), and local
+  IPv6 ranges. The macOS list cannot hold IPv6 addresses or single-word names such as `http://nas/`, so those get the 403;
+  use the device's IPv4 address instead. A public name that points at a private address (corporate split DNS, or a service
+  such as `localtest.me`) cannot be recognised. The provider resolves it on its own network, not yours.
 
 ### Data handling
 
 - The proxy and its control interface listen only on `127.0.0.1`. The control interface requires a random secret token and a
   matching `Host` header.
 - Your Webshare API key is stored in `config.json` with mode 600. It is not encrypted, so any program running as your user
-  can read it, and backup tools will copy it. Revoke the key in your Webshare dashboard if you believe it has leaked.
-- The log file at `~/Library/Logs/Kagewon.log` is readable only by you and never contains the sites you visit. The Activity
-  tab does show recent sites, but only in memory, and they are cleared when you turn the proxy off.
+  can read it, and backup tools will copy it. Revoke the key in your Webshare dashboard if you believe it has leaked. If a
+  file has to be set aside because it could not be read, the copy (`config.json.broken-*`) has the keys removed, and
+  temporary files left by an interrupted write are deleted when the helper starts.
+- Tor keeps its state, including its entry guard list, in `.tor/<provider>/` in the project folder between runs. The folder is
+  private to your user.
+- The log file at `~/Library/Logs/Kagewon.log` is readable only by you and never contains the sites you visit. It records
+  when the proxy turned on and how long each step took, and it is emptied when it reaches 2 MB. The Activity tab does show recent sites, but only in memory, and
+  they are cleared when you turn the proxy off or the helper stops.
 - The helper process receives only `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `USER`, and its own settings, not the rest of the
   environment that the app inherited.
 - The app contacts `api.ipify.org` (with `icanhazip.com` as a fallback) to show your exit IP address, `proxy.webshare.io`
-  to load your proxy list, and `check.torproject.org` briefly when Tor starts. Once when you turn the proxy on, it also asks
-  `api.ipify.org` directly, without the proxy, to learn your real IP address for the leak check. That service sees your real
-  address, as every website you visit does. The request carries no app name.
+  to load your proxy list, and `check.torproject.org` briefly when Tor starts. Each time you turn the proxy on (including
+  Try Again), it also asks the same IP echo services directly, without the proxy, to learn your real IP address for the leak
+  check. Those services see your real address, because that request does not use the proxy; the websites you reach through
+  the proxy do not. The request carries no app name and a generic user agent, but like any browser request it carries your
+  system language and the macOS TLS fingerprint.
 
 ### Known limitations
 
@@ -133,18 +161,30 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   reachable from the network, and a web page cannot use it.
 - If the Mac loses power, or both the app and its helper are killed, nothing listens on the proxy port any more. Another
   local program could bind that port until you open the app again. This matters on shared Macs.
-- If the Mac loses power or restarts while the proxy is on, the proxy settings may stay on until you open the app, which
-  clears them at startup and restores the automatic settings it saved. To clear them by hand:
+- With the kill switch on, force-quitting the app leaves the helper holding the port, so the internet stays blocked until you
+  open the app again. It stops the helper and restores the settings.
+- If the Mac loses power or restarts while the proxy is on, the proxy settings may stay on until you open the app. Open the
+  app first: it undoes the changes from its recovery record, including the PAC file, automatic discovery and the bypass
+  entries. If the app will not open, this switches off the manual proxy on every network that points at a local address.
+  It does not restore a PAC file or automatic discovery, so check System Settings, Network, your connection, Details, Proxies
+  afterwards:
 
   ```bash
-  networksetup -listallnetworkservices | tail -n +2 | while read s; do
-    networksetup -setwebproxystate "$s" off
-    networksetup -setsecurewebproxystate "$s" off
+  networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' | while read -r s; do
+    networksetup -getwebproxy "$s" | grep -q '^Server: 127\.0\.0\.1$' && networksetup -setwebproxystate "$s" off
+    networksetup -getsecurewebproxy "$s" | grep -q '^Server: 127\.0\.0\.1$' && networksetup -setsecurewebproxystate "$s" off
   done
   ```
 
 - Turning the proxy on replaces any manual proxy you had configured on the same network, and turning it off does not restore
-  it. A PAC file and automatic proxy discovery are restored.
+  it. A PAC file and automatic proxy discovery are restored, and the bypass entries Kagewon added are removed.
+- Captive portals (the sign-in pages of hotel, airport or cafe Wi-Fi) cannot be reached through the proxy. Turn Kagewon off,
+  sign in, and turn it on again.
+- A VPN that is installed as a network extension can route traffic in a way the Mac's proxy settings cannot see. The leak check
+  catches it only when it runs: at turn-on, after a wake from sleep, and after a network change.
+- "Reachable" means the proxy accepts connections. It may still refuse your login or a particular site. After a refusal,
+  Kagewon uses another proxy for that site. If no proxy can be reached, the proxy refuses to turn on. If they all fail while
+  it is on, applications get an error: there is no direct fallback.
 
 ## Safety guidance
 
@@ -176,8 +216,8 @@ Kagewon never decrypts HTTPS and sends no usage data to anyone. The services it 
 ### Recommended practice
 
 1. **Log in only to HTTPS sites.** On a plain HTTP site, the provider or the exit relay can read your password.
-2. **Use Tor for sensitive browsing.** No single party sees both who you are and where you go. Tor is slower, and some sites
-   block it.
+2. **Use Tor for sensitive browsing.** The relays you pass through do not see both who you are and where you go. The exit
+   relay still sees plain HTTP content, and your browser can still identify you. Tor is slower, and some sites block it.
 3. **Prefer Tor on public or shared networks.** Webshare proxies use plain HTTP to reach the proxy.
 4. **Use Sticky rotation for logins.** Random rotation changes the IP address on every connection, which breaks sessions and
    can make a site flag your account.
@@ -188,7 +228,7 @@ Kagewon never decrypts HTTPS and sends no usage data to anyone. The services it 
    follow the Mac's proxy settings.
 7. **Turn the proxy off when you are done.** The recent-sites list in the Activity tab is cleared at that point.
 8. **Protect your API key.** `config.json` is private to your user account but is not encrypted. Do not commit it, share it,
-   or post screenshots of it, and exclude it from cloud sync if you can. If you suspect it has leaked, revoke it in your
+   or post screenshots of it, and keep the project folder out of cloud sync. If you suspect it has leaked, revoke it in your
    Webshare dashboard and paste a new one in the app.
 9. **Use proxies only for activities you are permitted to perform.** See the [Disclaimer](#disclaimer).
 
@@ -198,19 +238,22 @@ Kagewon never decrypts HTTPS and sends no usage data to anyone. The services it 
 |---|---|
 | "Tor is not installed" | Run `brew install tor`, then try again. See [docs/tor.md](docs/tor.md). |
 | No provider is enabled | Open Providers and switch one on. |
-| Webshare shows an error | Check the API key in your Webshare dashboard, then press Test in the provider's menu. |
-| A site fails while others work | Some providers block specific sites. The Activity log notes this once per site. |
-| The internet stops after a restart | Open the app, or run the command in the previous section. |
-| Port already in use | Change the local port in Settings. |
+| Webshare shows an error | Check the API key in your Webshare dashboard, then press Test connection in the provider's menu. |
+| A site fails while others work | Some providers block specific sites. The Activity log notes this about once a minute per site. |
+| The internet stops after a restart | Open the app. If it will not open, run the command under [Known limitations](#known-limitations). |
+| Port already in use | Change the local port in Settings. The helper waits a few seconds for the port before it gives up. |
+| A router, NAS or other local device answers 403 | Use its IPv4 address. Single-word names and unusual spellings are refused, see [What the proxy covers](#what-the-proxy-covers). |
+| The icon keeps moving for a long time | The helper is loading or checking the proxy lists. The line under the app name says which step, and the log file records how long each step took. |
 
 ## Development
 
 ```bash
-npm install
+npm ci
 npm test             # helper tests
 npm run test:swift   # system proxy tests, run against a stand-in for networksetup (no real setting is changed)
 npm run test:live    # turn on, kill switch, turn off and quit with a real Tor; needs Tor and a few minutes, changes no real setting
 node proxy.mjs       # run the helper on its own; the app normally starts it
+npm run hooks        # install the secret guard: git hooks that refuse a commit or push containing config.json, other private files, or your saved key
 ```
 
 | Path | Contents |
@@ -219,11 +262,12 @@ node proxy.mjs       # run the helper on its own; the app normally starts it
 | `src/` | Helper modules: proxy engine, providers, Tor management, configuration, control interface |
 | `menubar/` | The macOS app (Swift), its build script, and its tests |
 | `docs/` | Additional documentation, the manual release checks, and the logo |
+| `scripts/hooks/` | The git hooks behind `npm run hooks` |
 | `test/` | Automated tests |
 
 Settings and providers are stored in `config.json` in the project folder. The environment variables `CONTROL_PORT`,
-`CONTROL_TOKEN`, `AUTOSTART`, `WEBSHARE_API_BASE` (accepted only for local addresses), and `KAGEWON_DIR` exist for the app and
-for tests. They are not needed for normal use.
+`CONTROL_TOKEN`, `AUTOSTART`, and `KAGEWON_DIR` exist for the app and for tests, and `WEBSHARE_API_BASE` (accepted only for local
+addresses) is honored only when `KAGEWON_DEV=1` is also set. None of them is needed for normal use.
 
 ## License
 

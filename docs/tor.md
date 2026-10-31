@@ -76,7 +76,7 @@ You do not need to run `brew services start tor`. Kagewon runs its own Tor insta
 |---|---|
 | "Tor is not installed" | Run `brew install tor` in Terminal, then try again. |
 | "Tor did not finish starting" | Your network may block Tor, as some workplaces, schools, and countries do. Try another network or a phone hotspot. |
-| "Could not bind" or "Address already in use" | Another program uses port 9250. Choose a different **Local port** for the provider. |
+| "Port 9250 is already in use by another program" | Choose a different **Local port** for the provider. |
 | The exit IP does not change | Make sure **Random** is selected, and that the Tor switch is on and the others are off. In Sticky mode a site keeps its address for the sticky time. |
 | Websites show CAPTCHAs or refuse you | Many sites block Tor exit relays. Use another provider for those sites. |
 | It is very slow | This is normal for Tor, and restricting exit countries can make it slower. |
